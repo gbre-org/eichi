@@ -12,8 +12,8 @@
 #
 # Each [[corpus]] block declares either:
 #   - a filesystem root (``path = ...``, ``extensions = [...]``), OR
-#   - a built-in connector by ``name = "claude-jsonl"`` or
-#     ``name = "claude-watch-queue"`` — see below.
+#   - a built-in connector by ``name = "claude-jsonl"``,
+#     ``name = "claude-watch-queue"``, or ``name = "botchat"`` — see below.
 
 # Filesystem corpora (walked by `eichi index <path>`).
 [[corpus]]
@@ -39,3 +39,13 @@ extensions = ["md"]
 # [[corpus]]
 # name = "claude-watch-queue"
 # path = "~/.config/session/queue.json"
+
+# botchat operator<->workbot chat messages — invoke via
+# `eichi index --corpus botchat`. Reads the botchat HTTP API
+# (default http://localhost:8111). Override the endpoint with
+# ``api_base`` here or the $EICHI_BOTCHAT_API_BASE env var. No-op when
+# the API is unreachable. One indexed doc per chat message; the source
+# tag is "botchat".
+# [[corpus]]
+# name = "botchat"
+# api_base = "http://localhost:8111"

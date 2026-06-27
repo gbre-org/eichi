@@ -21,22 +21,26 @@ Connectors shipped with eichi:
   rolling conversation clusters per session.
 - :mod:`eichi.connectors.claude_watch_queue` — claude-watch ``queue.json``
   task queue. One doc per finished queue item.
+- :mod:`eichi.connectors.botchat` — botchat operator<->workbot chat
+  service (HTTP API). One doc per chat message.
 
-Both connectors no-op gracefully when their underlying paths are absent,
-so it's safe to enable them in ``eichi.toml`` even on a fresh machine.
+All connectors no-op gracefully when their underlying source is absent
+(path missing / API unreachable), so it's safe to enable them in
+``eichi.toml`` even on a fresh machine.
 """
 
 from __future__ import annotations
 
 from typing import Callable, Dict
 
-from . import claude_jsonl, claude_watch_queue
+from . import botchat, claude_jsonl, claude_watch_queue
 
 # Public registry — name → module. The CLI walks this so callers do
 # ``eichi index --corpus <name>`` and we dispatch to the right module.
 REGISTRY: Dict[str, Callable] = {
     "claude-jsonl": claude_jsonl.iter_documents,
     "claude-watch-queue": claude_watch_queue.iter_documents,
+    "botchat": botchat.iter_documents,
 }
 
-__all__ = ["REGISTRY", "claude_jsonl", "claude_watch_queue"]
+__all__ = ["REGISTRY", "botchat", "claude_jsonl", "claude_watch_queue"]
