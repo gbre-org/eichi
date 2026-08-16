@@ -353,6 +353,44 @@ def remove_path(conn: sqlite3.Connection, path: str) -> int:
     return len(rowids)
 
 
+def _like_prefix_pattern(prefix: str) -> str:
+    """Build a LIKE pattern matching every path strictly under `prefix`.
+
+    `%` and `_` are LIKE wildcards, so a directory literally named
+    ``foo_bar`` would otherwise also match ``fooXbar``. We escape them
+    (and the escape character itself) and the caller pairs this with
+    ``ESCAPE '\\'``.
+    """
+    base = prefix.rstrip("/")
+    esc = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return esc + "/%"
+
+
+def paths_under(conn: sqlite3.Connection, prefix: str) -> List[str]:
+    """Every indexed path at or below the directory `prefix`, sorted.
+
+    Unions the ``files`` and ``chunk_meta`` path columns so an entry that
+    lost one of its two rows (partial write, interrupted run) is still
+    reported. Callers decide what to do with the paths — this function
+    only reads.
+
+    Prefix matching is on the string path with LIKE wildcards escaped;
+    callers doing something destructive should still confirm the prefix
+    in Python (see ``cli._find_missing_paths``).
+    """
+    base = prefix.rstrip("/")
+    pattern = _like_prefix_pattern(prefix)
+    rows = conn.execute(
+        """
+        SELECT path FROM files      WHERE path = ? OR path LIKE ? ESCAPE '\\'
+        UNION
+        SELECT path FROM chunk_meta WHERE path = ? OR path LIKE ? ESCAPE '\\'
+        """,
+        (base, pattern, base, pattern),
+    ).fetchall()
+    return sorted({r[0] for r in rows})
+
+
 def add_chunks(
     conn: sqlite3.Connection,
     *,
