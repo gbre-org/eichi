@@ -82,10 +82,20 @@ eichi reindex [<path>]   Wipe + rebuild for path or full DB
 eichi stats              Row count, sources, last-indexed time
 eichi ls [<source>]      List indexed files
 eichi rm <path>          Remove a file or directory from the index
+eichi rm --doc-id <id>   Remove one document by its literal indexed id
 ```
 
 All subcommands support `--json` for machine output. `index | reindex | rm`
 support `-n` (dry run) and `-v` (verbose).
+
+### Removing streamed documents
+
+`eichi rm <path>` resolves its argument against the cwd, which is right for
+files but wrong for documents that arrived through `index-stream`: a connector
+id such as `repo-md:<repo>:<relpath>` is not a filesystem path, and resolving
+it produces `$PWD/repo-md:...`, which matches nothing. Pass such ids as
+`eichi rm --doc-id <id>` — the value is used verbatim. The two forms are
+mutually exclusive and one of them is required; `-n` works with both.
 
 ### Indexing a directory reconciles it
 
