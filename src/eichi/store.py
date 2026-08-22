@@ -323,15 +323,21 @@ def needs_reindex(
 def remove_path(conn: sqlite3.Connection, path: str) -> int:
     """Delete all chunks + file row for `path`. Returns chunk count removed.
 
-    Accepts either a single file path or a directory prefix (anything starting
-    with the prefix is removed).
+    Accepts either a single file path or a directory prefix (anything strictly
+    under the prefix is removed).
+
+    The prefix arm escapes the LIKE wildcards `%` and `_` (see
+    ``_like_prefix_pattern``). Without that, a path containing `_` — every
+    underscore-bearing document id — matches siblings that merely have any
+    character in that position, and this function deletes them.
     """
     cur = conn.cursor()
+    pattern = _like_prefix_pattern(path)
     rowids = [
         r[0]
         for r in cur.execute(
-            "SELECT rowid FROM chunk_meta WHERE path = ? OR path LIKE ?",
-            (path, path.rstrip("/") + "/%"),
+            "SELECT rowid FROM chunk_meta WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            (path, pattern),
         ).fetchall()
     ]
     if rowids:
@@ -346,8 +352,8 @@ def remove_path(conn: sqlite3.Connection, path: str) -> int:
         # DELETE on a missing rowid is a no-op so this is safe either way.
         cur.executemany("DELETE FROM chunks_fts WHERE rowid = ?", [(r,) for r in rowids])
     cur.execute(
-        "DELETE FROM files WHERE path = ? OR path LIKE ?",
-        (path, path.rstrip("/") + "/%"),
+        "DELETE FROM files WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+        (path, pattern),
     )
     conn.commit()
     return len(rowids)

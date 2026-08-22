@@ -18,6 +18,7 @@ from . import EMBEDDING_DIM, EMBEDDING_MODEL, __version__
 from .chunk import chunk_text, detect_mode
 from .store import (
     DEFAULT_DB_PATH,
+    _like_prefix_pattern,
     add_chunks,
     ensure_fts_backfill,
     fts_count,
@@ -1339,14 +1340,25 @@ def cmd_ls(args) -> int:
 
 
 def cmd_rm(args) -> int:
+    doc_id = getattr(args, "doc_id", None)
+    if doc_id:
+        # Synthetic ids from streamed connector docs (e.g.
+        # "repo-md:<repo>:<relpath>") are not filesystem paths — resolving
+        # them would prepend the cwd and match nothing. Use them verbatim.
+        target = doc_id
+    elif args.path:
+        target = str(Path(args.path).expanduser().resolve())
+    else:
+        print("eichi: rm needs a path or --doc-id", file=sys.stderr)
+        return 2
     conn = open_db(args.db)
-    target = str(Path(args.path).expanduser().resolve())
     if args.dry_run:
         # Count what would be removed without changing anything.
         cur = conn.cursor()
         n = cur.execute(
-            "SELECT COUNT(*) FROM chunk_meta WHERE path = ? OR path LIKE ?",
-            (target, target.rstrip("/") + "/%"),
+            "SELECT COUNT(*) FROM chunk_meta "
+            "WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            (target, _like_prefix_pattern(target)),
         ).fetchone()[0]
         if args.json:
             print(json.dumps({"would_remove_chunks": n, "path": target}))
@@ -1382,7 +1394,8 @@ def build_parser() -> argparse.ArgumentParser:
               reindex  Wipe and rebuild for a path or the entire DB.
               stats    Show row count, sources, last-indexed time.
               ls       List indexed files (debug).
-              rm       Remove a file or directory from the index.
+              rm       Remove a file or directory (or a --doc-id) from
+                       the index.
             """
         ),
     )
@@ -1596,9 +1609,40 @@ def build_parser() -> argparse.ArgumentParser:
     pm = sub.add_parser(
         "rm",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        help="Remove a file/dir from the index",
+        help="Remove a file/dir (or a doc-id) from the index",
+        description=textwrap.dedent(
+            """\
+            Remove indexed documents.
+
+            Two forms:
+
+              eichi rm <path>              a file or directory, resolved
+                                           against the cwd; everything under
+                                           a directory goes too.
+              eichi rm --doc-id <id>       a literal indexed id, used as-is.
+                                           This is the form for streamed
+                                           connector documents, whose ids
+                                           ("repo-md:<repo>:<relpath>") are
+                                           not filesystem paths.
+
+            Exactly one of the two is required.
+            """
+        ),
     )
-    pm.add_argument("path")
+    grp = pm.add_mutually_exclusive_group()
+    grp.add_argument(
+        "path",
+        nargs="?",
+        help="filesystem path to remove (resolved against the cwd)",
+    )
+    grp.add_argument(
+        "--doc-id",
+        help=(
+            "remove a document by its literal indexed id instead of a path "
+            "— used for streamed connector docs whose id is not a file "
+            "(e.g. 'repo-md:<repo>:<relpath>'). Taken verbatim, not resolved."
+        ),
+    )
     pm.add_argument("-n", "--dry-run", action="store_true")
     pm.add_argument("--json", action="store_true")
     pm.set_defaults(func=cmd_rm)
