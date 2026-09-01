@@ -65,7 +65,7 @@ docker run --rm -it -p 8001:8000 \
   eichi-minisite:dev
 ```
 
-The minisite is also wired into the [`claude-watch`](https://github.com/hndrewaall/claude-watch)
+The minisite is also wired into the [`claude-watch`](https://github.com/gbre-org/claude-watch)
 fresh-laptop compose stack under `examples/compose/`. From the
 claude-watch repo: `make compose-up` brings both this minisite (port
 8001) and the queue-minisite (port 8000) up together.
