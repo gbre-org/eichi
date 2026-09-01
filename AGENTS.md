@@ -81,6 +81,6 @@ To add "search-first" behavior to an agent:
 3. For container-based agents that can't run the CLI directly, point at
    the minisite API (`/api/search`).
 
-See the [claude-watch container baked-CLAUDE.md](https://github.com/hndrewaall/claude-watch/blob/main/container/baked-CLAUDE.md)
+See the [claude-watch container baked-CLAUDE.md](https://github.com/gbre-org/claude-watch/blob/main/container/baked-CLAUDE.md)
 for a worked example of how this guidance is baked into a production
 agent loop.
