@@ -167,7 +167,7 @@ defaults: [`minisite/README.md`](./minisite/README.md).
 | `SEARCH_SITE_LOGO_URL` | *(empty)* | Header logo `<img>` src. Absolute URL or `/static/…` path. Empty = no logo. |
 | `SEARCH_SITE_LOGO_DEFAULT` | *(empty)* | Set to `1` to render the bundled `static/eichi-logo.png` when `SEARCH_SITE_LOGO_URL` is empty. |
 | `SEARCH_SITE_BRAND` | *(empty)* | Optional brand string appended to the footer. |
-| `SEARCH_SITE_FAVICON_URL` | *(empty)* | Favicon override. Empty = use the bundled generic favicon. |
+| `SEARCH_SITE_FAVICON_URL` | *(empty)* | Favicon override. Empty = use the bundled generic favicons in `minisite/static/branding/`. |
 | `SEARCH_DEFAULT_K` | `20` | Default top-K. |
 | `SEARCH_MAX_K` | `100` | Max top-K accepted via query string. |
 | `SEARCH_QUERY_TIMEOUT` | `30` | Per-query wall-clock cap (seconds). |
@@ -177,6 +177,13 @@ defaults: [`minisite/README.md`](./minisite/README.md).
 image-gen-generated abstract glyph (white on dark), fair-use safe (no
 third-party brand IP). Opt in via `SEARCH_SITE_LOGO_DEFAULT=1`, or
 ignore and ship your own via `SEARCH_SITE_LOGO_URL`.
+
+**Replacing the whole icon set**: the favicons live in
+`minisite/static/branding/`, a folder that holds nothing else, so a deploy can
+override every one of them by mounting one read-only directory over
+`static/branding` — see [`minisite/README.md`](minisite/README.md) for why that
+shape (and not per-file mounts, and not a mount over `static/`) is the only
+safe one.
 
 ### Source map configuration
 

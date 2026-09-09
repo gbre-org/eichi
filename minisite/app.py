@@ -114,7 +114,17 @@ SITE_TITLE = os.environ.get("SEARCH_SITE_TITLE", "eichi search")
 #   SEARCH_SITE_BRAND       — short brand string rendered in the
 #                             footer. Empty = no brand text.
 #   SEARCH_SITE_FAVICON_URL — favicon override. Empty = use the
-#                             bundled generic favicon.
+#                             bundled generic favicons in
+#                             static/branding/.
+#
+# The favicon set lives in static/BRANDING/ rather than static/ itself so a
+# deploy can replace every brand asset with ONE read-only folder mount over
+# static/branding. Mounting the files one by one pins each host inode (an
+# atomic rewrite on the host then never reaches the container), and mounting
+# static/ would shadow this app's own frontend — search.js, style.css, the
+# vendored morphdom — right out of the image. static/eichi-logo.png stays
+# OUTSIDE that folder deliberately: it is the app's own default logo, not a
+# brand slot for a deploy to overwrite.
 SITE_LOGO_URL = os.environ.get("SEARCH_SITE_LOGO_URL", "").strip()
 SITE_BRAND = os.environ.get("SEARCH_SITE_BRAND", "").strip()
 SITE_FAVICON_URL = os.environ.get("SEARCH_SITE_FAVICON_URL", "").strip()

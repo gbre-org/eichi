@@ -97,7 +97,25 @@ so the public image is whitelabel-able without forking:
 | `SEARCH_SITE_LOGO_URL` | *(empty)* | Header logo `<img>` src. Empty = no logo unless `SEARCH_SITE_LOGO_DEFAULT=1`. |
 | `SEARCH_SITE_LOGO_DEFAULT` | *(empty)* | Set to `1` to render the bundled `static/eichi-logo.png`. |
 | `SEARCH_SITE_BRAND` | *(empty)* | Footer brand string. Empty = no footer. |
-| `SEARCH_SITE_FAVICON_URL` | *(empty)* | Favicon override. Empty falls back to the bundled favicons. |
+| `SEARCH_SITE_FAVICON_URL` | *(empty)* | Favicon override. Empty falls back to the bundled favicons in `static/branding/`. |
+
+### Overriding the whole icon set: `static/branding/`
+
+The favicon set lives in **`static/branding/`**, not `static/` itself, so a
+deploy can replace all of it by mounting ONE read-only folder over
+`static/branding` — shadowing nothing else. Two constraints make that the only
+safe shape:
+
+- Mounting the files individually pins each host inode, so a later atomic
+  rewrite on the host (write-temp-then-rename, how most tooling updates a
+  file) never becomes visible inside the container.
+- Mounting `static/` itself would shadow the app's own frontend — `search.js`,
+  `style.css`, the vendored morphdom — straight out of the image.
+
+The files in `static/branding/` are the bundled generic defaults; a mount
+layers over them, and `SEARCH_SITE_LOGO_URL` should then point at
+`/static/branding/<file>`. `static/eichi-logo.png` stays outside that folder on
+purpose: it is the app's own default logo, not a brand slot.
 
 ## Environment
 
