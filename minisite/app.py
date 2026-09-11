@@ -786,6 +786,75 @@ def _parse_year(value: str | None, label: str) -> tuple[int | None, str | None]:
     return year, None
 
 
+# Loud stale-index surface for the web API. The threshold mirrors
+# eichi.store._stale_threshold_days (default 7d, env EICHI_STALE_DAYS) so the
+# CLI banner and the API's stale_index/index_age_days always agree. Computed
+# here with stdlib sqlite3 ONLY — this Flask process deliberately does not
+# import eichi + its heavy ML deps (those live in the worker venv).
+try:
+    STALE_INDEX_THRESHOLD_DAYS = float(os.environ.get("EICHI_STALE_DAYS", "") or 7.0)
+    if STALE_INDEX_THRESHOLD_DAYS <= 0:
+        STALE_INDEX_THRESHOLD_DAYS = 7.0
+except ValueError:
+    STALE_INDEX_THRESHOLD_DAYS = 7.0
+
+
+def _resolve_index_db_path() -> "str | None":
+    """Resolve the sqlite index path the same way eichi.store does."""
+    if EICHI_DB:
+        return EICHI_DB
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = xdg or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "eichi", "index.db")
+
+
+def _index_staleness() -> "dict[str, Any]":
+    """Cheap stdlib-only index-freshness probe for the API response.
+
+    Returns keys: stale_index (bool), index_age_days (float|None),
+    last_indexed (str|None), threshold_days (float), warning (str|None).
+    Best-effort: any error yields a non-stale ("unknown") result so the
+    search path is never broken by the freshness probe.
+    """
+    info = {
+        "stale_index": False,
+        "index_age_days": None,
+        "last_indexed": None,
+        "threshold_days": STALE_INDEX_THRESHOLD_DAYS,
+        "warning": None,
+    }
+    db = _resolve_index_db_path()
+    if not db or not os.path.exists(db):
+        return info
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT MAX(indexed_at), "
+                "CAST(strftime('%s', MAX(indexed_at)) AS REAL) FROM files"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return info
+    if not row or row[1] is None:
+        return info
+    last_indexed = row[0]
+    last_unix = float(row[1])
+    age_days = max(0.0, (time.time() - last_unix) / 86400.0)
+    info["last_indexed"] = last_indexed
+    info["index_age_days"] = round(age_days, 2)
+    if age_days >= STALE_INDEX_THRESHOLD_DAYS:
+        info["stale_index"] = True
+        info["warning"] = (
+            f"EICHI INDEX STALE: last indexed {last_indexed} "
+            f"({age_days:.0f}d ago, threshold {STALE_INDEX_THRESHOLD_DAYS:.0f}d) "
+            f"— results may be missing recent data; re-index with "
+            f"`eichi index <path>`"
+        )
+    return info
+
+
 @app.route("/api/search")
 def api_search() -> Any:
     raw_query = (request.args.get("q") or "").strip()
@@ -793,6 +862,10 @@ def api_search() -> Any:
     raw_source = (request.args.get("source") or "").strip() or None
     raw_added_since = (request.args.get("added_since") or "").strip() or None
     raw_retrieval = (request.args.get("retrieval") or "").strip() or None
+
+    # Loud stale-index surface: one cheap stdlib probe per request, merged
+    # into every response shape below so callers ALWAYS see index freshness.
+    stale = _index_staleness()
 
     # Build a default error envelope so each early-return branch has a
     # consistent shape — keeps the JSON contract stable for the UI.
@@ -811,6 +884,10 @@ def api_search() -> Any:
                     "added_since": raw_added_since,
                     "retrieval": raw_retrieval,
                     "elapsed_ms": 0,
+                    "stale_index": stale["stale_index"],
+                    "index_age_days": stale["index_age_days"],
+                    "index_last_indexed": stale["last_indexed"],
+                    "index_warning": stale["warning"],
                 }
             ),
             status,
@@ -885,6 +962,10 @@ def api_search() -> Any:
                 "added_since": raw_added_since,
                 "retrieval": retrieval,
                 "elapsed_ms": 0,
+                "stale_index": stale["stale_index"],
+                "index_age_days": stale["index_age_days"],
+                "index_last_indexed": stale["last_indexed"],
+                "index_warning": stale["warning"],
                 "error": None,
             }
         )
@@ -948,6 +1029,10 @@ def api_search() -> Any:
             "added_since": raw_added_since,
             "retrieval": retrieval,
             "elapsed_ms": elapsed_ms,
+            "stale_index": stale["stale_index"],
+            "index_age_days": stale["index_age_days"],
+            "index_last_indexed": stale["last_indexed"],
+            "index_warning": stale["warning"],
             "error": err,
         }
     )
