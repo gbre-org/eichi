@@ -81,6 +81,13 @@ To add "search-first" behavior to an agent:
 3. For container-based agents that can't run the CLI directly, point at
    the minisite API (`/api/search`).
 
+For **Claude Code** specifically, this is already wired up:
+[`.claude/skills/eichi-search/SKILL.md`](.claude/skills/eichi-search/SKILL.md)
+in this repo is a project skill that Claude Code auto-discovers on session
+startup, encoding this same search-first decision tree. Copy that pattern
+(a `.claude/skills/<name>/SKILL.md` with frontmatter + the decision tree) if
+your agent framework has an equivalent auto-loaded-skill mechanism.
+
 See the [claude-watch container baked-CLAUDE.md](https://github.com/gbre-org/claude-watch/blob/main/container/baked-CLAUDE.md)
 for a worked example of how this guidance is baked into a production
 agent loop.
