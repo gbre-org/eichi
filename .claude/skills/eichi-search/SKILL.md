@@ -3,14 +3,17 @@ name: eichi-search
 description: |
   Use eichi as the default FIRST lookup for open-ended, fuzzy recall questions
   ("where is X", "what did we decide about Y", "find the note where I wrote
-  about Z") — before grepping or asking the user for context. eichi is a
-  local sqlite-vec + sentence-transformers semantic search index over your
-  own notes, transcripts, and files. Trigger on: recall / "did we already
-  discuss..." / "where did I write about..." / searching notes, transcripts,
-  or logs for a concept rather than an exact string. NOT for exact-string
-  lookups (function names, error codes, config keys — use grep) or
-  structured data (metrics, timestamps, statuses — use a domain-specific
-  tool).
+  about Z", "we already discussed this", missing context after a /clear or
+  compaction) — before grepping, guessing, or asking the operator to
+  re-explain. eichi is a local sqlite-vec + sentence-transformers semantic
+  search index over your own notes, transcripts, and files, queried via the
+  `eichi` CLI (directly, or through host-bash from a container session — NEVER
+  by bare-curling the eichi-search HTTP endpoint, see below). Trigger on:
+  recall / "did we already discuss..." / "where did I write about..." /
+  searching notes, transcripts, or logs for a concept rather than an exact
+  string. NOT for exact-string lookups (function names, error codes, config
+  keys — use grep) or structured data (metrics, timestamps, statuses — use a
+  domain-specific tool).
 ---
 
 # eichi search
@@ -21,6 +24,13 @@ plus [`sentence-transformers`](https://www.sbert.net/) for embeddings, over
 your own notes, chat transcripts, or files. Everything lives in one SQLite
 file (`~/.local/share/eichi/index.db` by default); queries run fully offline
 after the one-time embedding-model bootstrap.
+
+## Find it yourself before asking the operator
+
+If you're missing context — post-`/clear`, "we already discussed this",
+"what did we decide about X" — **search eichi yourself first.** Don't ask the
+operator to re-explain something that's plausibly already indexed. Only
+surface a question once eichi comes back empty or `[distant]`-only.
 
 ## When to use it — decision tree
 
@@ -34,9 +44,12 @@ after the one-time embedding-model bootstrap.
 Fall back to grep only if eichi returns nothing, or every hit scores
 `[distant]` — not before.
 
-## How to query
+## How to query — CLI first, always
 
-The CLI is the primary interface:
+The `eichi` CLI is the primary and preferred interface, on the host or from
+inside any environment (e.g. a Claude Code container session) where it's
+reachable — including via an MCP shell bridge such as `host-bash`, when the
+CLI isn't on `PATH` directly inside the sandbox:
 
 ```bash
 eichi query "<question>"                  # top-K hybrid (vec + BM25) hits
@@ -47,8 +60,17 @@ eichi stats                               # doc count, last-indexed time, DB siz
 eichi ls                                  # indexed files + chunk counts
 ```
 
-Where the index is served over HTTP instead of a local CLI (e.g. from
-inside a container without the venv), use the web API:
+From a container session with a `host-bash`-style bridge to the CLI's host,
+run the exact same command through that bridge (e.g.
+`mcp__host-bash__run_command` with `eichi query "<question>" -k 6`) — do not
+substitute a raw HTTP call for it. Check the CLI is reachable (`eichi stats`)
+before assuming it isn't.
+
+### Last resort ONLY: the web API
+
+If, and only if, the `eichi` CLI is genuinely unreachable from your
+environment (confirmed — not assumed) AND the `eichi-search` minisite/API
+container is running, fall back to its HTTP endpoint:
 
 ```bash
 curl -s "http://<host>/api/search?q=<query>&k=5" | jq .
@@ -56,7 +78,11 @@ curl -s "http://<host>/api/search?q=<query>&k=5" | jq .
 
 Query params: `q` (required), `k` (top-K, default 20), `source` (filter by
 source tag), `added_since` (duration, e.g. `1d` / `7d` / `30d`), `retrieval`
-(`hybrid` | `vector` | `bm25`).
+(`hybrid` | `vector` | `bm25`). Treat this as a documented fallback for an
+environment with no CLI access at all — not a shortcut when the CLI is simply
+inconvenient to invoke. If you find yourself reaching for `curl` here as a
+matter of habit, that's the anti-pattern this skill exists to stop: check for
+the CLI (directly, or through a shell bridge like `host-bash`) first.
 
 ## Interpreting results
 
