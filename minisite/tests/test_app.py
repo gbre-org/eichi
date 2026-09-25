@@ -1423,3 +1423,80 @@ def test_admin_wildcard_unions_db_sources(monkeypatch):
         "new-source",
     }
 
+
+# ----------------------------------------------------------------------
+# stale-index surface (stale_index / index_age_days / index_warning)
+# ----------------------------------------------------------------------
+
+
+def _stub_stale(monkeypatch, *, stale, age=None, warning=None, last="x"):
+    monkeypatch.setattr(
+        search_app,
+        "_index_staleness",
+        lambda: {
+            "stale_index": stale,
+            "index_age_days": age,
+            "last_indexed": last,
+            "threshold_days": 7.0,
+            "warning": warning,
+        },
+    )
+
+
+def test_search_response_includes_stale_fields_when_stale(client, monkeypatch):
+    _stub_stale(
+        monkeypatch,
+        stale=True,
+        age=80.0,
+        warning="EICHI INDEX STALE: last indexed 2026-06-27",
+        last="2026-06-27 00:00:00",
+    )
+    body = client.get("/api/search?q=test").get_json()
+    assert body["stale_index"] is True
+    assert body["index_age_days"] == 80.0
+    assert body["index_last_indexed"] == "2026-06-27 00:00:00"
+    assert "EICHI INDEX STALE" in body["index_warning"]
+
+
+def test_search_response_stale_fields_when_fresh(client, monkeypatch):
+    _stub_stale(monkeypatch, stale=False, age=0.5, warning=None)
+    body = client.get("/api/search?q=test").get_json()
+    assert body["stale_index"] is False
+    assert body["index_warning"] is None
+
+
+def test_empty_query_and_error_still_carry_stale_fields(client, monkeypatch):
+    _stub_stale(monkeypatch, stale=True, age=80.0, warning="stale!")
+    empty = client.get("/api/search?q=").get_json()
+    assert empty["stale_index"] is True and empty["index_warning"] == "stale!"
+    err = client.get("/api/search?q=x&k=notint").get_json()
+    assert err["stale_index"] is True and err["index_warning"] == "stale!"
+
+
+def test_index_staleness_probe_reads_db(tmp_path, monkeypatch):
+    import datetime
+    import sqlite3
+    import time
+
+    db = tmp_path / "index.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE files(path TEXT, indexed_at TEXT)")
+    old = datetime.datetime.utcfromtimestamp(time.time() - 80 * 86400).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    conn.execute("INSERT INTO files VALUES ('p', ?)", (old,))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(search_app, "EICHI_DB", str(db))
+    info = search_app._index_staleness()
+    assert info["stale_index"] is True
+    assert 79.0 <= info["index_age_days"] <= 81.0
+    assert "EICHI INDEX STALE" in info["warning"]
+
+
+def test_index_staleness_probe_missing_db_is_not_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_app, "EICHI_DB", str(tmp_path / "nope.db"))
+    info = search_app._index_staleness()
+    assert info["stale_index"] is False
+    assert info["last_indexed"] is None
+
