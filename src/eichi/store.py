@@ -1042,6 +1042,71 @@ def stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+# Default staleness threshold (days) after which the index is flagged stale
+# on EVERY CLI invocation and in the web-API response. Overridable via the
+# EICHI_STALE_DAYS env var.
+STALE_INDEX_THRESHOLD_DAYS = 7.0
+
+
+def _stale_threshold_days() -> float:
+    """Resolve the staleness threshold in days (env EICHI_STALE_DAYS, default 7)."""
+    raw = os.environ.get("EICHI_STALE_DAYS")
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return STALE_INDEX_THRESHOLD_DAYS
+
+
+def index_staleness(conn: sqlite3.Connection, *, now: Optional[float] = None) -> dict:
+    """Report how stale the index is, from the newest ``indexed_at`` timestamp.
+
+    Shared by the CLI (loud stderr banner in ``main``) and mirrored by the
+    minisite web API so both surface the SAME threshold + computation.
+
+    Returns a dict:
+      last_indexed       ISO datetime string (UTC) of the newest file, or None
+      last_indexed_unix  float epoch seconds, or None on an empty index
+      index_age_days     float days since the last index, or None
+      threshold_days     float threshold in effect
+      stale_index        bool (False when the index is empty / unknown)
+      warning            human-readable banner text, or None when fresh
+    """
+    threshold = _stale_threshold_days()
+    now_ts = time.time() if now is None else now
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT MAX(indexed_at), "
+        "CAST(strftime('%s', MAX(indexed_at)) AS REAL) FROM files"
+    ).fetchone()
+    last_indexed = row[0] if row else None
+    last_unix = float(row[1]) if row and row[1] is not None else None
+    age_days: Optional[float] = None
+    stale = False
+    warning: Optional[str] = None
+    if last_unix is not None:
+        age_days = max(0.0, (now_ts - last_unix) / 86400.0)
+        if age_days >= threshold:
+            stale = True
+            warning = (
+                f"EICHI INDEX STALE: last indexed {last_indexed} "
+                f"({age_days:.0f}d ago, threshold {threshold:.0f}d) — "
+                f"results may be missing recent data; re-index with "
+                f"`eichi index <path>`"
+            )
+    return {
+        "last_indexed": last_indexed,
+        "last_indexed_unix": last_unix,
+        "index_age_days": age_days,
+        "threshold_days": threshold,
+        "stale_index": stale,
+        "warning": warning,
+    }
+
+
 def stats_by_source(conn: sqlite3.Connection) -> list:
     """Return per-source metric rows: file_count, chunk_count, last_indexed_unix.
 

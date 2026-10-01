@@ -22,6 +22,7 @@ from .store import (
     add_chunks,
     ensure_fts_backfill,
     fts_count,
+    index_staleness,
     infer_source,
     list_files,
     needs_reindex,
@@ -1650,9 +1651,37 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _warn_if_stale(db_path) -> None:
+    """Print a loud stderr banner if the on-disk index is stale.
+
+    Best-effort and never raises: a probe failure must never block the
+    actual command. Written to stderr so it never corrupts --json stdout.
+    """
+    try:
+        conn = open_db(db_path)
+        try:
+            info = index_staleness(conn)
+        finally:
+            conn.close()
+    except Exception:
+        return
+    if not info.get("stale_index"):
+        return
+    warning = info.get("warning") or "EICHI INDEX STALE"
+    bar = "!" * 76
+    print(bar, file=sys.stderr)
+    print(f"⚠️  {warning}", file=sys.stderr)
+    print(bar, file=sys.stderr)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Loud, unmissable stale-index warning on EVERY invocation that reads the
+    # index (all commands except the ones that (re)build it). See
+    # eichi.store.index_staleness for the shared threshold + computation.
+    if getattr(args, "func", None) not in (cmd_index, cmd_index_stream):
+        _warn_if_stale(getattr(args, "db", None))
     return args.func(args)
 
 
