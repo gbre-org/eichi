@@ -44,16 +44,18 @@ else:  # pragma: no cover
 class Corpus:
     name: str
     # ``path`` is required for filesystem corpora (walked by
-    # ``eichi index <path>``) but OPTIONAL for connector corpora
-    # (``name`` matches a built-in connector in the REGISTRY, e.g.
-    # ``botchat`` / ``claude-jsonl``) — those resolve their source via
-    # the connector's own config (``options`` / env vars), not a path.
+    # ``eichi index <path>``) but OPTIONAL for connector corpora, which
+    # resolve their source via the connector's own config (``options``).
     path: Optional[Path] = None
     extensions: List[str] = field(default_factory=list)
-    # Extra per-corpus keys (anything besides name/path/extensions).
-    # Passed straight through to a connector's ``iter_documents(config=...)``
-    # so connector-specific knobs (e.g. botchat's ``api_base``) can be
-    # declared in eichi.toml. Empty for plain filesystem corpora.
+    # Connector module to use. ``None`` means ``name`` itself is a
+    # built-in connector name (e.g. ``claude-jsonl``). Setting it lets
+    # several differently-named corpora share one connector (e.g. two
+    # ``http-conversation`` sources), each indexed under its own name.
+    connector: Optional[str] = None
+    # Extra per-corpus keys (anything besides name/path/extensions/
+    # connector). Passed straight through to a connector's
+    # ``iter_documents(config=...)``. Empty for plain filesystem corpora.
     options: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -90,7 +92,7 @@ def load(path: Optional[Path] = None) -> Config:
     except Exception:  # pragma: no cover — defensive
         connector_names = set()
 
-    _RESERVED = {"name", "path", "extensions"}
+    _RESERVED = {"name", "path", "extensions", "connector"}
     corpora: List[Corpus] = []
     for raw in data.get("corpus", []) or []:
         name = raw.get("name")
@@ -98,7 +100,10 @@ def load(path: Optional[Path] = None) -> Config:
         if not name:
             continue
         # A filesystem corpus needs a path; a connector corpus does not.
-        if not cpath and str(name) not in connector_names:
+        connector = raw.get("connector")
+        if connector is not None and str(connector) not in connector_names:
+            continue  # unknown connector: skip rather than index nothing
+        if not cpath and connector is None and str(name) not in connector_names:
             continue
         options = {k: v for k, v in raw.items() if k not in _RESERVED}
         corpora.append(
@@ -106,6 +111,7 @@ def load(path: Optional[Path] = None) -> Config:
                 name=str(name),
                 path=Path(os.path.expanduser(str(cpath))) if cpath else None,
                 extensions=[str(x).lstrip(".") for x in raw.get("extensions", [])],
+                connector=str(connector) if connector is not None else None,
                 options=options,
             )
         )

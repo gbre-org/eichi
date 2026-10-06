@@ -12,8 +12,11 @@
 #
 # Each [[corpus]] block declares either:
 #   - a filesystem root (``path = ...``, ``extensions = [...]``), OR
-#   - a built-in connector by ``name = "claude-jsonl"``,
-#     ``name = "claude-watch-queue"``, or ``name = "botchat"`` — see below.
+#   - a built-in connector by ``name = "claude-jsonl"`` or
+#     ``name = "claude-watch-queue"``, OR
+#   - any ``name`` plus ``connector = "http-conversation"`` (generic
+#     HTTP/JSON conversation source; declare as many as you like) — see
+#     below.
 
 # Filesystem corpora (walked by `eichi index <path>`).
 [[corpus]]
@@ -40,12 +43,49 @@ extensions = ["md"]
 # name = "claude-watch-queue"
 # path = "~/.config/session/queue.json"
 
-# botchat operator<->workbot chat messages — invoke via
-# `eichi index --corpus botchat`. Reads the botchat HTTP API
-# (default http://localhost:8111). Override the endpoint with
-# ``api_base`` here or the $EICHI_BOTCHAT_API_BASE env var. No-op when
-# the API is unreachable. One indexed doc per chat message; the source
-# tag is "botchat".
+# Generic conversation sources. ``name`` is the source tag the messages are
+# indexed under, so each source can be searched on its own
+# (``--source team-chat``) or together (``--source team-chat,support-inbox``).
+# Everything backend-specific is config: endpoint, field mapping, auth and
+# pagination. Index with `eichi index --corpus <name>`; the recurring
+# reindex script picks up every block automatically. The hosts, ports and
+# field names below are placeholders.
+#
 # [[corpus]]
-# name = "botchat"
-# api_base = "http://localhost:8111"
+# name = "team-chat"
+# connector = "http-conversation"
+# url = "http://chat.example.test:8080/api/messages"
+# items_path = "messages"            # where the list lives in the response
+# timestamp_format = "epoch"         # or "epoch_ms" / "iso8601"
+# [corpus.fields]                    # dotted paths into each message
+# id = "id"
+# body = "body"
+# author = "sender"
+# timestamp = "ts"
+# thread = "topic"
+# reply_to = "reply_to"
+# [corpus.pagination]
+# mode = "before"                    # GET ...?limit=500&before=<oldest id>
+#
+# A second, differently-shaped source alongside it: bearer auth read from
+# the environment, nested fields, page-number pagination, ISO timestamps.
+# [[corpus]]
+# name = "support-inbox"
+# connector = "http-conversation"
+# url = "https://helpdesk.example.test/v2/threads/export"
+# items_path = "data.items"
+# timestamp_format = "iso8601"
+# [corpus.headers]
+# Authorization = "Bearer ${SUPPORT_INBOX_TOKEN}"
+# [corpus.fields]
+# id = "uid"
+# body = "content.text"
+# author = "from.name"
+# timestamp = "created_at"
+# thread = "subject"
+# [corpus.pagination]
+# mode = "page"
+# page_param = "p"
+#
+# A local JSON export works too: url = "file:///path/to/export.json"
+# (use format = "jsonl" for one JSON object per line).
