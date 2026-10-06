@@ -32,7 +32,7 @@ def _hit(*, score, kind="", cluster_id="", path="x", mtime=0.0,
     return SearchHit(
         rowid=1,
         score=score,
-        source="signal-chat",
+        source="team-chat",
         path=path,
         chunk_idx=0,
         offset=0,
@@ -51,9 +51,9 @@ def _hit(*, score, kind="", cluster_id="", path="x", mtime=0.0,
 def test_dedupe_cluster_wins_drops_msg_inside():
     """Cluster ranks higher than msg → msg suppressed."""
     cluster = _hit(score=0.10, kind="cluster", cluster_id="c1",
-                   path="signal-chat:cluster:dm:a:1")
+                   path="team-chat:cluster:dm:a:1")
     msg = _hit(score=0.20, kind="msg", cluster_id="c1",
-               path="signal-chat:dm:a:1")
+               path="team-chat:dm:a:1")
     out = _dedupe_cluster_overlap([cluster, msg])
     assert out == [cluster]
 
@@ -61,9 +61,9 @@ def test_dedupe_cluster_wins_drops_msg_inside():
 def test_dedupe_msg_wins_keeps_both():
     """Msg ranks higher AND outside the 5% slack → cluster doesn't shadow."""
     msg = _hit(score=0.10, kind="msg", cluster_id="c1",
-               path="signal-chat:dm:a:1")
+               path="team-chat:dm:a:1")
     cluster = _hit(score=0.50, kind="cluster", cluster_id="c1",
-                   path="signal-chat:cluster:dm:a:1")
+                   path="team-chat:cluster:dm:a:1")
     out = _dedupe_cluster_overlap([msg, cluster])
     # 0.50 > 0.10 * 1.05 = 0.105, so msg is NOT shadowed by the cluster.
     assert out == [msg, cluster]
@@ -72,10 +72,10 @@ def test_dedupe_msg_wins_keeps_both():
 def test_dedupe_msg_within_slack_dropped():
     """Cluster ranks within 5% of the msg → msg dropped (cluster represents it)."""
     msg = _hit(score=0.100, kind="msg", cluster_id="c1",
-               path="signal-chat:dm:a:1")
+               path="team-chat:dm:a:1")
     # cluster_score 0.104 <= msg_score * 1.05 = 0.105 → drop msg.
     cluster = _hit(score=0.104, kind="cluster", cluster_id="c1",
-                   path="signal-chat:cluster:dm:a:1")
+                   path="team-chat:cluster:dm:a:1")
     out = _dedupe_cluster_overlap([msg, cluster])
     assert out == [cluster]
 
@@ -83,9 +83,9 @@ def test_dedupe_msg_within_slack_dropped():
 def test_dedupe_msg_from_unrelated_cluster_kept():
     """Msg whose cluster isn't in the result set is unaffected."""
     cluster = _hit(score=0.10, kind="cluster", cluster_id="c1",
-                   path="signal-chat:cluster:dm:a:1")
+                   path="team-chat:cluster:dm:a:1")
     other_msg = _hit(score=0.20, kind="msg", cluster_id="c2",
-                     path="signal-chat:dm:b:99")
+                     path="team-chat:dm:b:99")
     out = _dedupe_cluster_overlap([cluster, other_msg])
     assert out == [cluster, other_msg]
 
@@ -101,9 +101,9 @@ def test_dedupe_legacy_rows_passthrough():
 def test_dedupe_msg_with_no_cluster_id_kept():
     """Msg with empty cluster_id (e.g. cluster never emitted yet) is kept."""
     msg = _hit(score=0.10, kind="msg", cluster_id="",
-               path="signal-chat:dm:a:1")
+               path="team-chat:dm:a:1")
     cluster = _hit(score=0.05, kind="cluster", cluster_id="c1",
-                   path="signal-chat:cluster:dm:b:1")
+                   path="team-chat:cluster:dm:b:1")
     out = _dedupe_cluster_overlap([msg, cluster])
     assert out == [msg, cluster]
 
@@ -132,7 +132,7 @@ def test_print_hit_text_cluster_prefix():
         score=0.4,
         kind="cluster",
         cluster_id="c1",
-        path="signal-chat:cluster:dm:a:1",
+        path="team-chat:cluster:dm:a:1",
         text="[dm:a] X: hi\n[dm:a] X: bye",
         mtime=1_700_000_000.0,
         mtime_end=1_700_000_300.0,
@@ -141,7 +141,7 @@ def test_print_hit_text_cluster_prefix():
     parts = line.split("\t")
     # 5-col layout: path:offset, score, kind_tag, ts, snippet
     assert len(parts) == 5
-    assert parts[2] == "[signal-chat cluster, 2 msgs]"
+    assert parts[2] == "[team-chat cluster, 2 msgs]"
     # Range timestamp: same day, "HH:MM–HH:MM ET" inside the brackets.
     assert "–" in parts[3]
 
@@ -151,13 +151,13 @@ def test_print_hit_text_msg_prefix():
         score=0.4,
         kind="msg",
         cluster_id="c1",
-        path="signal-chat:dm:a:1",
+        path="team-chat:dm:a:1",
         text="[dm:a] X: hi",
         mtime=1_700_000_000.0,
     )
     line = _print_hit(h, json_out=False)
     parts = line.split("\t")
-    assert parts[2] == "[signal-chat msg]"
+    assert parts[2] == "[team-chat msg]"
 
 
 def test_print_hit_json_carries_cluster_fields():
@@ -165,7 +165,7 @@ def test_print_hit_json_carries_cluster_fields():
         score=0.4,
         kind="cluster",
         cluster_id="c1",
-        path="signal-chat:cluster:dm:a:1",
+        path="team-chat:cluster:dm:a:1",
         text="[dm:a] X: hi\n[dm:a] X: bye",
         mtime=1_700_000_000.0,
         mtime_end=1_700_000_300.0,
@@ -182,7 +182,7 @@ def test_format_cluster_timestamp_range_same_day():
         score=0.4,
         kind="cluster",
         cluster_id="c1",
-        path="signal-chat:cluster:dm:a:1",
+        path="team-chat:cluster:dm:a:1",
         # 2025-06-01 10:00:00 ET = 1748786400 (approx). Use specific values.
         mtime=1_748_786_400.0,
         # ~7 minutes later, same day.
@@ -238,23 +238,23 @@ def test_index_stream_picks_up_metadata_kind_and_cluster_id(db_path):
         json.dumps(d)
         for d in [
             {
-                "source": "signal-chat",
-                "doc_id": "signal-chat:dm:a:1",
+                "source": "team-chat",
+                "doc_id": "team-chat:dm:a:1",
                 "text": "first message",
                 "mtime": 1_700_000_000.0,
                 "metadata": {
                     "kind": "msg",
-                    "cluster_id": "signal-chat:cluster:dm:a:1",
+                    "cluster_id": "team-chat:cluster:dm:a:1",
                 },
             },
             {
-                "source": "signal-chat",
-                "doc_id": "signal-chat:cluster:dm:a:1",
+                "source": "team-chat",
+                "doc_id": "team-chat:cluster:dm:a:1",
                 "text": "[dm:a] X: first message\n[dm:a] X: second message",
                 "mtime": 1_700_000_000.0,
                 "metadata": {
                     "kind": "cluster",
-                    "cluster_id": "signal-chat:cluster:dm:a:1",
+                    "cluster_id": "team-chat:cluster:dm:a:1",
                     "mtime_end": 1_700_000_300.0,
                 },
             },
@@ -267,12 +267,12 @@ def test_index_stream_picks_up_metadata_kind_and_cluster_id(db_path):
         "SELECT path, kind, cluster_id, mtime_end FROM files ORDER BY path"
     ).fetchall()
     by_path = {r[0]: r for r in rows}
-    assert by_path["signal-chat:dm:a:1"][1] == "msg"
-    assert by_path["signal-chat:dm:a:1"][2] == "signal-chat:cluster:dm:a:1"
-    assert by_path["signal-chat:dm:a:1"][3] is None
-    assert by_path["signal-chat:cluster:dm:a:1"][1] == "cluster"
-    assert by_path["signal-chat:cluster:dm:a:1"][2] == "signal-chat:cluster:dm:a:1"
-    assert by_path["signal-chat:cluster:dm:a:1"][3] == pytest.approx(1_700_000_300.0)
+    assert by_path["team-chat:dm:a:1"][1] == "msg"
+    assert by_path["team-chat:dm:a:1"][2] == "team-chat:cluster:dm:a:1"
+    assert by_path["team-chat:dm:a:1"][3] is None
+    assert by_path["team-chat:cluster:dm:a:1"][1] == "cluster"
+    assert by_path["team-chat:cluster:dm:a:1"][2] == "team-chat:cluster:dm:a:1"
+    assert by_path["team-chat:cluster:dm:a:1"][3] == pytest.approx(1_700_000_300.0)
 
 
 def test_search_surfaces_kind_and_cluster_id(db_path):
@@ -280,13 +280,13 @@ def test_search_surfaces_kind_and_cluster_id(db_path):
     kind/cluster_id/mtime_end populated."""
     payload = json.dumps(
         {
-            "source": "signal-chat",
-            "doc_id": "signal-chat:cluster:dm:a:1",
+            "source": "team-chat",
+            "doc_id": "team-chat:cluster:dm:a:1",
             "text": "[dm:a] X: hi",
             "mtime": 1_700_000_000.0,
             "metadata": {
                 "kind": "cluster",
-                "cluster_id": "signal-chat:cluster:dm:a:1",
+                "cluster_id": "team-chat:cluster:dm:a:1",
                 "mtime_end": 1_700_000_120.0,
             },
         }
@@ -300,7 +300,7 @@ def test_search_surfaces_kind_and_cluster_id(db_path):
     assert hits
     h = hits[0]
     assert h.kind == "cluster"
-    assert h.cluster_id == "signal-chat:cluster:dm:a:1"
+    assert h.cluster_id == "team-chat:cluster:dm:a:1"
     assert h.mtime_end == pytest.approx(1_700_000_120.0)
 
 
@@ -314,23 +314,23 @@ def test_cmd_query_granular_disables_dedupe(db_path, capsys):
         json.dumps(d)
         for d in [
             {
-                "source": "signal-chat",
-                "doc_id": "signal-chat:dm:a:1",
+                "source": "team-chat",
+                "doc_id": "team-chat:dm:a:1",
                 "text": "alpha bravo charlie",
                 "mtime": 1_700_000_000.0,
                 "metadata": {
                     "kind": "msg",
-                    "cluster_id": "signal-chat:cluster:dm:a:1",
+                    "cluster_id": "team-chat:cluster:dm:a:1",
                 },
             },
             {
-                "source": "signal-chat",
-                "doc_id": "signal-chat:cluster:dm:a:1",
+                "source": "team-chat",
+                "doc_id": "team-chat:cluster:dm:a:1",
                 "text": "[dm:a] X: alpha bravo charlie",
                 "mtime": 1_700_000_000.0,
                 "metadata": {
                     "kind": "cluster",
-                    "cluster_id": "signal-chat:cluster:dm:a:1",
+                    "cluster_id": "team-chat:cluster:dm:a:1",
                     "mtime_end": 1_700_000_120.0,
                 },
             },

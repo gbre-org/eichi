@@ -462,7 +462,7 @@ def _print_hit(h, json_out: bool, raw_score: bool = False) -> str:
         )
     ts_str = _format_hit_timestamp(h)
     # Source/kind tag column. For cluster rows we expand it from
-    # "[signal-chat]" to "[signal-chat cluster, 5 msgs]" so the line
+    # "[chat]" to "[chat cluster, 5 msgs]" so the line
     # is self-describing at a glance.
     if cluster_kind == "cluster":
         kind_tag = f"[{h.source} cluster, {cluster_size} msgs]"
@@ -584,7 +584,8 @@ def _cmd_index_corpus(args) -> int:
     """Run a named connector and pipe its JSONL output into the index.
 
     Connectors live under :mod:`eichi.connectors` and are registered in
-    that package's ``REGISTRY`` dict. Each connector exposes
+    that package's ``REGISTRY`` dict (built-ins plus any
+    ``eichi.connectors`` entry points). Each connector exposes
     ``iter_documents(state, config) -> Iterator[dict]``.
     """
     from . import embed
@@ -1172,17 +1173,28 @@ def _parse_duration(spec: Optional[str]) -> Optional[float]:
 
 # Live conversation sources searched by --conversations. Snapshot sources
 # (old transcripts, file notes) are deliberately left out so near-duplicate
-# stale chunks cannot crowd out recent conversations.
-# Built-in live conversation sources; every corpus configured with the
-# generic ``http-conversation`` connector is added at query time.
-CONVERSATION_SOURCES = ("claude-jsonl", "claude-watch-queue")
+# stale chunks cannot crowd out recent conversations. Which connectors count
+# as conversational is declared by each connector (``KIND = "conversation"``),
+# not hardcoded here.
 CONVERSATIONS_RECENCY_HALFLIFE = "14d"
 
 
 def _conversation_sources() -> List[str]:
-    out = list(CONVERSATION_SOURCES)
+    """Source names backed by a connector that declares itself conversational.
+
+    Built-in conversational connectors are always included (their corpus
+    name is the connector name) unless the module is ``MULTI_CORPUS``; any other connector contributes every
+    configured corpus that uses it.
+    """
+    from .connectors import _BUILTIN_MODULES, KIND_CONVERSATION, kind_of
+
+    out = [
+        n for n, m in _BUILTIN_MODULES.items()
+        if kind_of(n) == KIND_CONVERSATION
+        and not getattr(m, "MULTI_CORPUS", False)
+    ]
     for name, module in _configured_connectors().items():
-        if module == "http-conversation" and name not in out:
+        if kind_of(module) == KIND_CONVERSATION and name not in out:
             out.append(name)
     return out
 
@@ -1645,8 +1657,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "preset for recalling conversations: search the live sources "
-            f"({', '.join(CONVERSATION_SOURCES)} plus every configured "
-            "http-conversation corpus) with per-source RRF, a "
+            "(every configured corpus whose connector declares "
+            "KIND = \"conversation\") with per-source RRF, a "
             f"{CONVERSATIONS_RECENCY_HALFLIFE} recency boost and path "
             "collapse. --source narrows it; --exclude-source trims it."
         ),

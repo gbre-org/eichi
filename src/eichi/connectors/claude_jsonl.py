@@ -427,6 +427,11 @@ def _emit_for_session(
         }
 
 
+# Declared connector kind: a live conversation source (see
+# eichi.connectors for the contract).
+KIND = "conversation"
+
+
 def iter_documents(
     state: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
