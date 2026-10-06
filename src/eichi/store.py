@@ -90,6 +90,9 @@ class SearchHit:
     # writes them.
     vec_rank: Optional[int] = None
     bm25_rank: Optional[int] = None
+    # Final fused score from fuse_groups() (cross-source RRF, optionally
+    # recency-weighted). None when the hit did not go through fusion.
+    fused_score: Optional[float] = None
 
 
 def _serialize_f32(vec: np.ndarray) -> bytes:
@@ -594,6 +597,13 @@ def _build_fts_match(query: str) -> str:
     return " ".join(_quote_fts_term(t) for t in tokens)
 
 
+def _event_ts_since(mtime: float, indexed_at: float, since_unix: float) -> bool:
+    """True when the hit's event timestamp (mtime, else indexed_at) is at or
+    after ``since_unix``. Hits with no timestamp at all never match."""
+    ts = mtime if mtime and mtime > 0 else indexed_at
+    return bool(ts and ts > 0 and ts >= float(since_unix))
+
+
 def search_bm25(
     conn: sqlite3.Connection,
     query: str,
@@ -604,6 +614,7 @@ def search_bm25(
     year_max: Optional[int] = None,
     added_since_unix: Optional[float] = None,
     allowed_sources: Optional[List[str]] = None,
+    since_unix: Optional[float] = None,
 ) -> List[SearchHit]:
     """BM25 (fts5) search; returns top-k SearchHit ordered by ascending
     bm25() score (smaller = better in fts5's bm25() rank function).
@@ -629,6 +640,7 @@ def search_bm25(
         or year_max is not None
         or added_since_unix is not None
         or allowed_set
+        or since_unix is not None
     )
     fetch_k = max(k * 5, 50) if has_post_filter else k
     try:
@@ -697,6 +709,10 @@ def search_bm25(
         if added_since_unix is not None:
             if not added_known or added_f < float(added_since_unix):
                 continue
+        if since_unix is not None and not _event_ts_since(
+            mtime_f, indexed_at_f, since_unix
+        ):
+            continue
 
         hits.append(
             SearchHit(
@@ -732,8 +748,14 @@ def search(
     added_since_unix: Optional[float] = None,
     sort: str = "relevance",
     allowed_sources: Optional[List[str]] = None,
+    since_unix: Optional[float] = None,
 ) -> List[SearchHit]:
     """KNN search; returns top-k SearchHit.
+
+    ``since_unix`` filters on the *event* timestamp (``files.mtime`` when
+    populated, else ``files.indexed_at``) so it works for every source,
+    unlike ``added_since_unix`` which needs ``library_added_at``. Hits
+    with no usable timestamp are excluded when it is set.
 
     Default ordering is by ascending vec0 distance ("relevance"). Set
     ``sort="added"`` to re-order the post-filter result set by
@@ -779,7 +801,7 @@ def search(
     has_post_filter = bool(
         source or year_min is not None or year_max is not None
         or added_since_unix is not None or sort != "relevance"
-        or allowed_set
+        or allowed_set or since_unix is not None
     )
     fetch_k = max(k * 5, 50) if has_post_filter else k
     rows = conn.execute(
@@ -844,6 +866,10 @@ def search(
         if added_since_unix is not None:
             if not added_known or added_f < float(added_since_unix):
                 continue
+        if since_unix is not None and not _event_ts_since(
+            mtime_f, indexed_at_f, since_unix
+        ):
+            continue
 
         hits.append(
             SearchHit(
@@ -900,6 +926,7 @@ def search_hybrid(
     rrf_k: int = RRF_K,
     fetch_per_pass: Optional[int] = None,
     allowed_sources: Optional[List[str]] = None,
+    since_unix: Optional[float] = None,
 ) -> List[SearchHit]:
     """Hybrid retrieval: union of vec0 KNN + fts5 BM25 merged by RRF.
 
@@ -941,6 +968,7 @@ def search_hybrid(
         added_since_unix=added_since_unix,
         sort="relevance",  # rank by raw distance — sort applied post-merge
         allowed_sources=allowed_sources,
+        since_unix=since_unix,
     )
     bm25_hits = search_bm25(
         conn,
@@ -951,6 +979,7 @@ def search_hybrid(
         year_max=year_max,
         added_since_unix=added_since_unix,
         allowed_sources=allowed_sources,
+        since_unix=since_unix,
     )
 
     # Build the merged map keyed by rowid (the unique chunk id).
@@ -1216,3 +1245,83 @@ def transaction(conn: sqlite3.Connection):
     except Exception:
         conn.rollback()
         raise
+
+
+# --- cross-source fusion -----------------------------------------------------
+
+# Floor of the recency multiplier: a hit with no timestamp, or one far older
+# than the half-life, keeps this fraction of its fused score.
+RECENCY_FLOOR = 0.2
+
+
+def hit_event_ts(h: SearchHit) -> float:
+    """The hit's event timestamp: ``mtime`` when populated, else the ingest
+    time, else 0.0 (unknown)."""
+    mt = float(h.mtime or 0.0)
+    if mt > 0:
+        return mt
+    return float(h.indexed_at_unix or 0.0)
+
+
+def recency_factor(
+    ts: float, now: float, halflife_s: float, floor: float = RECENCY_FLOOR
+) -> float:
+    """Multiplier in ``[floor, 1]``: 1.0 for a brand-new hit, halving the
+    above-floor part every ``halflife_s`` seconds. Unknown timestamp ->
+    ``floor``."""
+    if ts <= 0 or halflife_s <= 0:
+        return floor
+    age = max(0.0, now - ts)
+    return floor + (1.0 - floor) * 0.5 ** (age / halflife_s)
+
+
+def collapse_paths(hits: List[SearchHit]) -> List[SearchHit]:
+    """Keep only the first (best-ranked) hit per ``path``."""
+    seen: set = set()
+    out: List[SearchHit] = []
+    for h in hits:
+        if h.path in seen:
+            continue
+        seen.add(h.path)
+        out.append(h)
+    return out
+
+
+def fuse_groups(
+    groups: List[List[SearchHit]],
+    *,
+    rrf_k: int = RRF_K,
+    halflife_s: Optional[float] = None,
+    now: Optional[float] = None,
+) -> List[SearchHit]:
+    """Merge several ranked hit lists (typically one per source) by RRF.
+
+    Each list is consumed by rank only, so a noisy source with many
+    near-duplicate chunks cannot crowd out the others: rank 1 of every
+    list carries the same weight. When ``halflife_s`` is set the fused
+    score is multiplied by :func:`recency_factor`. A chunk appearing in
+    several lists (same rowid) accumulates score and is emitted once.
+    Returns hits ordered by descending ``fused_score``.
+    """
+    import time as _time
+
+    now = _time.time() if now is None else now
+    merged: dict[int, dict] = {}
+    order = 0
+    for group in groups:
+        for rank, h in enumerate(group, start=1):
+            e = merged.get(h.rowid)
+            if e is None:
+                e = {"hit": h, "rrf": 0.0, "order": order}
+                merged[h.rowid] = e
+                order += 1
+            e["rrf"] += 1.0 / (rrf_k + rank)
+    scored = []
+    for e in merged.values():
+        score = e["rrf"]
+        if halflife_s:
+            score *= recency_factor(hit_event_ts(e["hit"]), now, halflife_s)
+        e["hit"].fused_score = score
+        scored.append((-score, e["order"], e["hit"]))
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return [t[2] for t in scored]

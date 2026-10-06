@@ -48,6 +48,14 @@ host instead.
   one JSON-per-line).
 - **Date / metadata filters**: `--year-min`, `--year-max`, `--added-since 30d`,
   `--sort relevance|added|year`.
+- **Cross-source recall**: `--source a,b` / `--exclude-source x` scope the
+  sources searched; `--per-source N` retrieves per source and merges by
+  Reciprocal Rank Fusion so one noisy source cannot crowd out the rest;
+  `--since 2d` filters on the event timestamp for every source (unlike
+  `--added-since`, which needs `library_added_at`); `--recency-boost 14d`
+  applies a half-life recency weight; `--collapse-paths` keeps the best hit
+  per path. `--conversations` bundles the live conversation sources, per-source
+  RRF, a 14d recency boost and path collapse.
 - **Per-call attribution**: `--caller cli|web|agent|mainloop` (or
   `$EICHI_CALLER`) tags every query in a local JSONL log, useful for
   partitioning RTT metrics.
