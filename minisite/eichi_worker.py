@@ -424,7 +424,7 @@ def main() -> int:
                 # cluster_id / mtime_end (added in a recent eichi release). Pass
                 # them straight through; cluster_size is derived from the
                 # text using the same heuristic as the CLI's _print_hit
-                # so the front-end can render a "[signal-chat cluster,
+                # so the front-end can render a "[<source> cluster,
                 # N msgs]"-style badge. cluster_size==0 for non-cluster
                 # rows is the documented sentinel.
                 cluster_kind = getattr(h, "kind", "") or ""

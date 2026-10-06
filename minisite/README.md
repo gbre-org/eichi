@@ -57,11 +57,12 @@ Standalone `docker run`:
 ```bash
 docker build -t eichi-minisite:dev -f minisite/Dockerfile .
 docker run --rm -it -p 8001:8000 \
-  -v "$HOME/repos/eichi:/home/hndrewaall/repos/eichi:ro" \
-  -v "$HOME/.local/share/eichi:/home/hndrewaall/.local/share/eichi:rw" \
-  -v "$HOME/.cache/huggingface:/home/hndrewaall/.cache/huggingface:ro" \
-  -e EICHI_DB=/home/hndrewaall/.local/share/eichi/index.db \
-  -e EICHI_PYTHON=/home/hndrewaall/repos/eichi/.venv/bin/python \
+  -v "$HOME/repos/eichi:/opt/eichi/repo:ro" \
+  -v "$HOME/.local/share/eichi:/opt/eichi/data:rw" \
+  -v "$HOME/.cache/huggingface:/opt/eichi/hf-cache:ro" \
+  -e EICHI_DB=/opt/eichi/data/index.db \
+  -e EICHI_PYTHON=/opt/eichi/repo/.venv/bin/python \
+  -e HF_HOME=/opt/eichi/hf-cache \
   eichi-minisite:dev
 ```
 
@@ -121,8 +122,8 @@ purpose: it is the app's own default logo, not a brand slot.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `EICHI_DB` | `/home/hndrewaall/.local/share/eichi/index.db` | Path to the sqlite-vec DB inside the container. |
-| `EICHI_PYTHON` | `/home/hndrewaall/repos/eichi/.venv/bin/python` | Bind-mounted host venv interpreter that imports the eichi package. |
+| `EICHI_DB` | `/opt/eichi/data/index.db` | Path to the sqlite-vec DB inside the container. |
+| `EICHI_PYTHON` | `/opt/eichi/repo/.venv/bin/python` | Bind-mounted host venv interpreter that imports the eichi package. |
 | `SEARCH_DEFAULT_K` | `20` | Default top-K. |
 | `SEARCH_MAX_K` | `100` | Max top-K accepted via query string. |
 | `SEARCH_QUERY_TIMEOUT` | `30` | Per-query wall-clock cap (seconds). |

@@ -322,17 +322,12 @@ main {
   outline-offset: 2px;
 }
 
-/* Per-source border tinting. The default card border-left already
-   renders a neutral hue; these rules override per known source tag.
-   Source tags are opaque wire-protocol vocabulary emitted by the
-   operator's connectors — add a rule here for any tag you want a
-   distinct hue for. The set below covers the in-tree source tags. */
-.result-card[data-source="signal-chat"]        { border-left-color: var(--running); }
-.result-card[data-source="repo-md"]            { border-left-color: var(--pending); }
-.result-card[data-source="memory"]             { border-left-color: var(--pending); }
-.result-card[data-source="queue-logs"]         { border-left-color: #6c71c4; /* violet */ }
-.result-card[data-source="obsidian"]           { border-left-color: var(--done); }
-.result-card[data-source="calibre"]            { border-left-color: #d33682; /* magenta */ }
+/* Per-source tinting is data-driven: search.js stamps each card with a
+   --src-hue custom property derived from a stable hash of the opaque
+   source tag, so any configured source gets a consistent colour with no
+   per-source rule here. Cards without the property keep the neutral
+   default border colour. */
+.result-card[style*="--src-hue"] { border-left-color: hsl(var(--src-hue) 55% 45%); }
 
 .result-head {
   display: flex;
@@ -354,13 +349,7 @@ main {
   white-space: nowrap;
 }
 
-.source-badge { background: var(--info); color: #fff; }
-.source-badge.source-signal-chat        { background: var(--running); }
-.source-badge.source-repo-md            { background: var(--pending); color: #000; }
-.source-badge.source-memory             { background: var(--pending); color: #000; }
-.source-badge.source-queue-logs         { background: #6c71c4; }
-.source-badge.source-obsidian           { background: var(--done); }
-.source-badge.source-calibre            { background: #d33682; }
+.source-badge { background: hsl(var(--src-hue, 210) 55% 42%); color: #fff; }
 
 .result-score {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;

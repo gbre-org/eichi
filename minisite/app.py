@@ -559,7 +559,7 @@ def _pick_ts(rec: dict[str, Any]) -> tuple[float | None, str]:
     """Pick the most relevant timestamp for a result record.
 
     Returns ``(unix_ts, kind)`` where ``kind`` is ``"mtime"`` (upstream /
-    per-connector relevance time, e.g. signal send-time, file mtime) or
+    per-connector relevance time, e.g. message send-time, file mtime) or
     ``"indexed"`` (when eichi ingested the row). Returns ``(None, "")``
     if neither is populated.
     """

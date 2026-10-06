@@ -33,11 +33,12 @@ serve-minisite: minisite-build
 		docker compose -f minisite/docker-compose.yml up; \
 	else \
 		docker run --rm -it -p 8001:8000 \
-			-v "$$HOME/repos/eichi:/home/hndrewaall/repos/eichi:ro" \
-			-v "$$HOME/.local/share/eichi:/home/hndrewaall/.local/share/eichi:rw" \
-			-v "$$HOME/.cache/huggingface:/home/hndrewaall/.cache/huggingface:ro" \
-			-e EICHI_DB=/home/hndrewaall/.local/share/eichi/index.db \
-			-e EICHI_PYTHON=/home/hndrewaall/repos/eichi/.venv/bin/python \
+			-v "$$HOME/repos/eichi:/opt/eichi/repo:ro" \
+			-v "$$HOME/.local/share/eichi:/opt/eichi/data:rw" \
+			-v "$$HOME/.cache/huggingface:/opt/eichi/hf-cache:ro" \
+			-e EICHI_DB=/opt/eichi/data/index.db \
+			-e EICHI_PYTHON=/opt/eichi/repo/.venv/bin/python \
+			-e HF_HOME=/opt/eichi/hf-cache \
 			eichi-minisite:dev; \
 	fi
 
