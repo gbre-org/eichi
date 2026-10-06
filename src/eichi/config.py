@@ -32,7 +32,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 if sys.version_info >= (3, 11):
     import tomllib as _toml
@@ -43,8 +43,18 @@ else:  # pragma: no cover
 @dataclass
 class Corpus:
     name: str
-    path: Path
+    # ``path`` is required for filesystem corpora (walked by
+    # ``eichi index <path>``) but OPTIONAL for connector corpora
+    # (``name`` matches a built-in connector in the REGISTRY, e.g.
+    # ``botchat`` / ``claude-jsonl``) — those resolve their source via
+    # the connector's own config (``options`` / env vars), not a path.
+    path: Optional[Path] = None
     extensions: List[str] = field(default_factory=list)
+    # Extra per-corpus keys (anything besides name/path/extensions).
+    # Passed straight through to a connector's ``iter_documents(config=...)``
+    # so connector-specific knobs (e.g. botchat's ``api_base``) can be
+    # declared in eichi.toml. Empty for plain filesystem corpora.
+    options: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,17 +79,34 @@ def load(path: Optional[Path] = None) -> Config:
         return Config()
     with open(p, "rb") as fh:
         data = _toml.load(fh)
+    # Known connector names — a path-less corpus block is valid iff its
+    # ``name`` matches a built-in connector (those resolve their source
+    # via connector config, not a filesystem path). Imported lazily so a
+    # connector import error never breaks plain config loading.
+    try:
+        from .connectors import REGISTRY as _CONNECTORS
+
+        connector_names = set(_CONNECTORS)
+    except Exception:  # pragma: no cover — defensive
+        connector_names = set()
+
+    _RESERVED = {"name", "path", "extensions"}
     corpora: List[Corpus] = []
     for raw in data.get("corpus", []) or []:
         name = raw.get("name")
         cpath = raw.get("path")
-        if not name or not cpath:
+        if not name:
             continue
+        # A filesystem corpus needs a path; a connector corpus does not.
+        if not cpath and str(name) not in connector_names:
+            continue
+        options = {k: v for k, v in raw.items() if k not in _RESERVED}
         corpora.append(
             Corpus(
                 name=str(name),
-                path=Path(os.path.expanduser(str(cpath))),
+                path=Path(os.path.expanduser(str(cpath))) if cpath else None,
                 extensions=[str(x).lstrip(".") for x in raw.get("extensions", [])],
+                options=options,
             )
         )
     return Config(corpora=corpora)

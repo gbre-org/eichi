@@ -547,10 +547,17 @@ def _load_corpus_config(name: str) -> dict:
         return {}
     for corpus in cfg.corpora:
         if corpus.name == name:
-            return {
+            cfg_dict = {
                 "path": str(corpus.path) if corpus.path else None,
                 "extensions": corpus.extensions,
             }
+            # Merge connector-specific options (e.g. botchat's
+            # ``api_base``) declared alongside name/path in eichi.toml.
+            # name/path/extensions stay authoritative — options only add
+            # keys the base dict doesn't already define.
+            for key, value in (corpus.options or {}).items():
+                cfg_dict.setdefault(key, value)
+            return cfg_dict
     return {}
 
 
