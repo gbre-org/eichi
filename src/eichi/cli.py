@@ -537,6 +537,19 @@ def _save_connector_state(path: Path, key: str, state: dict) -> None:
         pass
 
 
+def _configured_connectors() -> dict:
+    """Map corpus name -> connector module for eichi.toml corpora that
+    name an explicit ``connector``. Empty when no config is present."""
+    try:
+        from .config import load as _load_cfg
+
+        return {
+            c.name: c.connector for c in _load_cfg().corpora if c.connector
+        }
+    except Exception:
+        return {}
+
+
 def _load_corpus_config(name: str) -> dict:
     """Read the [[corpus]] block for ``name`` from eichi.toml. Returns {}
     when the file or the named block is missing.
@@ -555,12 +568,14 @@ def _load_corpus_config(name: str) -> dict:
                 "path": str(corpus.path) if corpus.path else None,
                 "extensions": corpus.extensions,
             }
-            # Merge connector-specific options (e.g. botchat's
-            # ``api_base``) declared alongside name/path in eichi.toml.
-            # name/path/extensions stay authoritative — options only add
-            # keys the base dict doesn't already define.
+            # Merge connector-specific options declared alongside
+            # name/path in eichi.toml. name/path/extensions stay
+            # authoritative — options only add keys the base dict
+            # doesn't already define.
             for key, value in (corpus.options or {}).items():
                 cfg_dict.setdefault(key, value)
+            # The corpus name is the source tag its docs are indexed under.
+            cfg_dict.setdefault("source", corpus.name)
             return cfg_dict
     return {}
 
@@ -577,19 +592,20 @@ def _cmd_index_corpus(args) -> int:
     from .store import add_chunks, sha256_text
 
     name = args.corpus
-    if name not in REGISTRY:
-        known = ", ".join(sorted(REGISTRY)) or "(none)"
+    state_path = _connector_state_path()
+    config = _load_corpus_config(name)
+    configured = _configured_connectors()
+    module = configured.get(name, name)
+    if module not in REGISTRY:
+        known = ", ".join(sorted(set(REGISTRY) | set(configured))) or "(none)"
         print(
             f"eichi: unknown corpus {name!r}. Known: {known}",
             file=sys.stderr,
         )
         return 2
-
-    state_path = _connector_state_path()
     state = _load_connector_state(state_path, name)
-    config = _load_corpus_config(name)
 
-    iter_docs = REGISTRY[name]
+    iter_docs = REGISTRY[module]
     conn = open_db(args.db)
     cur = conn.cursor()
 
@@ -1157,8 +1173,18 @@ def _parse_duration(spec: Optional[str]) -> Optional[float]:
 # Live conversation sources searched by --conversations. Snapshot sources
 # (old transcripts, file notes) are deliberately left out so near-duplicate
 # stale chunks cannot crowd out recent conversations.
-CONVERSATION_SOURCES = ("botchat", "claude-jsonl", "claude-watch-queue")
+# Built-in live conversation sources; every corpus configured with the
+# generic ``http-conversation`` connector is added at query time.
+CONVERSATION_SOURCES = ("claude-jsonl", "claude-watch-queue")
 CONVERSATIONS_RECENCY_HALFLIFE = "14d"
+
+
+def _conversation_sources() -> List[str]:
+    out = list(CONVERSATION_SOURCES)
+    for name, module in _configured_connectors().items():
+        if module == "http-conversation" and name not in out:
+            out.append(name)
+    return out
 
 
 def _split_sources(spec: Optional[str]) -> List[str]:
@@ -1242,7 +1268,7 @@ def cmd_query(args) -> int:
     include = _split_sources(args.source)
     exclude = set(_split_sources(getattr(args, "exclude_source", None)))
     if conversations and not include:
-        include = list(CONVERSATION_SOURCES)
+        include = _conversation_sources()
     per_source = getattr(args, "per_source", None)
     # None = one unscoped pass; otherwise one retrieval pass per source.
     sources: Optional[List[str]] = None
@@ -1619,7 +1645,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "preset for recalling conversations: search the live sources "
-            f"({', '.join(CONVERSATION_SOURCES)}) with per-source RRF, a "
+            f"({', '.join(CONVERSATION_SOURCES)} plus every configured "
+            "http-conversation corpus) with per-source RRF, a "
             f"{CONVERSATIONS_RECENCY_HALFLIFE} recency boost and path "
             "collapse. --source narrows it; --exclude-source trims it."
         ),

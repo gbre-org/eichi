@@ -60,7 +60,7 @@ def db(tmp_path):
     for i in range(8):
         put("transcripts", f"/t/old{i}.md", f"rc prep old {i}", 40 + i)
     # Live sources, slightly farther in vector space but recent.
-    put("botchat", "botchat:1", "rc prep yesterday", 1)
+    put("team-chat", "team-chat:1", "rc prep yesterday", 1)
     put("claude-jsonl", "jsonl:1", "rc prep session", 2)
     conn.close()
     return tmp_path / "c.db"
@@ -83,30 +83,30 @@ def test_baseline_stale_source_crowds(db):
 
 
 def test_comma_source_scopes(db):
-    rows = run(["rc prep", "--source", "botchat,claude-jsonl", "--json",
+    rows = run(["rc prep", "--source", "team-chat,claude-jsonl", "--json",
                 "--retrieval", "vector"], db)
-    assert {r["source"] for r in rows} == {"botchat", "claude-jsonl"}
+    assert {r["source"] for r in rows} == {"team-chat", "claude-jsonl"}
 
 
 def test_exclude_source(db):
     rows = run(["rc prep", "--exclude-source", "transcripts", "--json",
                 "--retrieval", "vector"], db)
-    assert {r["source"] for r in rows} == {"botchat", "claude-jsonl"}
+    assert {r["source"] for r in rows} == {"team-chat", "claude-jsonl"}
 
 
 def test_per_source_rrf_interleaves(db):
     rows = run(["rc prep", "-k", "3", "--per-source", "3", "--json",
                 "--retrieval", "vector"], db)
     srcs = [r["source"] for r in rows]
-    assert "botchat" in srcs and "claude-jsonl" in srcs
+    assert "team-chat" in srcs and "claude-jsonl" in srcs
     assert all(r["fused_score"] is not None for r in rows)
 
 
 def test_since_filters_on_event_time(db):
     rows = run(["rc prep", "--since", "3d", "--json", "--retrieval", "vector"], db)
-    assert {r["source"] for r in rows} == {"botchat", "claude-jsonl"}
+    assert {r["source"] for r in rows} == {"team-chat", "claude-jsonl"}
     rows = run(["rc prep", "--since", "3d", "--json", "--retrieval", "hybrid"], db)
-    assert {r["source"] for r in rows} <= {"botchat", "claude-jsonl"}
+    assert {r["source"] for r in rows} <= {"team-chat", "claude-jsonl"}
 
 
 def test_added_since_still_needs_library_added_at(db):
@@ -114,12 +114,18 @@ def test_added_since_still_needs_library_added_at(db):
     assert rows == []
 
 
-def test_conversations_preset(db):
+def test_conversations_preset(db, tmp_path, monkeypatch):
+    cfg = tmp_path / "eichi.toml"
+    cfg.write_text(
+        '[[corpus]]\nname = "team-chat"\nconnector = "http-conversation"\n'
+        'url = "file:///nonexistent.json"\n'
+    )
+    monkeypatch.setenv("EICHI_CONFIG", str(cfg))
     rows = run(["rc prep", "--conversations", "--json"], db)
     assert rows
-    assert {r["source"] for r in rows} <= {"botchat", "claude-jsonl",
+    assert {r["source"] for r in rows} <= {"team-chat", "claude-jsonl",
                                            "claude-watch-queue"}
-    assert rows[0]["source"] == "botchat"
+    assert rows[0]["source"] == "team-chat"
 
 
 def test_conversations_source_narrows(db):
@@ -131,7 +137,7 @@ def test_conversations_source_narrows(db):
 def test_recency_boost_promotes_recent(db):
     rows = run(["rc prep", "--recency-boost", "3d", "-k", "3", "--json",
                 "--retrieval", "vector"], db)
-    assert rows[0]["source"] in ("botchat", "claude-jsonl")
+    assert rows[0]["source"] in ("team-chat", "claude-jsonl")
 
 
 def test_bad_args(db):
@@ -157,7 +163,7 @@ def test_collapse_paths_keeps_first():
 def test_collapse_cli_duplicate_path(tmp_path):
     conn = open_db(tmp_path / "d.db")
     for i in range(2):
-        add_chunks(conn, source="botchat", path="botchat:dup", mtime=time.time(),
+        add_chunks(conn, source="team-chat", path="team-chat:dup", mtime=time.time(),
                    file_hash="h", chunks=[(i, 0, f"same msg {i}")],
                    embeddings=_near(i)[None, :])
     conn.close()

@@ -16,7 +16,8 @@
 #      eichi.toml / ~/.config/eichi/eichi.toml) and is host-local, NOT
 #      committed — it's where YOUR personal corpus paths live.
 #   2. Every connector shipped with eichi (`eichi index --corpus <name>`,
-#      currently claude-jsonl, claude-watch-queue + botchat). Each no-ops gracefully
+#      currently claude-jsonl, claude-watch-queue), then every eichi.toml corpus that
+#      declares a `connector = ...` (e.g. http-conversation sources). Each no-ops gracefully
 #      when their underlying paths are absent, so this is safe to run on
 #      any machine, configured or not.
 #
@@ -86,12 +87,21 @@ if [ -x "$VENV_PY" ]; then
   corpora="$("$VENV_PY" -c '
 from eichi.config import load
 for c in load().corpora:
-    print(c.path)
+    if c.path:
+        print("path\t" + str(c.path))
+    elif c.connector:
+        print("corpus\t" + c.name)
 ' 2>/dev/null)"
   if [ -n "$corpora" ]; then
-    while IFS= read -r path; do
-      [ -n "$path" ] || continue
-      run "$EICHI" index "$path"
+    while IFS=$'\t' read -r kind target; do
+      [ -n "$target" ] || continue
+      if [ "$kind" = corpus ]; then
+        # Connector corpus (e.g. an http-conversation source): incremental,
+        # no-ops when its endpoint is unreachable.
+        run "$EICHI" index --corpus "$target"
+      else
+        run "$EICHI" index "$target"
+      fi
     done <<<"$corpora"
   else
     echo "(no [[corpus]] entries configured — see eichi.toml.example)"
@@ -104,9 +114,6 @@ fi
 # --- 2. Built-in connectors ------------------------------------------------
 run "$EICHI" index --corpus claude-jsonl
 run "$EICHI" index --corpus claude-watch-queue
-# botchat: incremental by message id above the stored max_id; no-ops when
-# the botchat API is unreachable.
-run "$EICHI" index --corpus botchat
 
 echo "=== eichi-reindex done (rc=$rc) at $(date -u +%FT%TZ) ==="
 exit "$rc"
