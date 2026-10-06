@@ -60,6 +60,7 @@ timestamp = "at"
 ''')
     monkeypatch.setenv("EICHI_CONFIG", str(cfg))
     monkeypatch.setenv("EICHI_CONNECTOR_STATE", str(tmp_path / "state.json"))
+    monkeypatch.setattr("eichi.cli.DEFAULT_DB_PATH", tmp_path / "default.db")
     monkeypatch.setenv("EICHI_NO_QUERY_LOG", "1")
     return tmp_path / "idx.db"
 
@@ -94,12 +95,62 @@ def test_two_sources_index_and_filter(env):
     assert {r["source"] for r in conv} == {"alpha-chat", "beta-inbox"}
 
 
+def _cursor(db, name):
+    import sqlite3
+
+    conn = sqlite3.connect(str(db))
+    try:
+        row = conn.execute(
+            "SELECT v FROM meta WHERE k = ?", (f"connector_state:{name}",)
+        ).fetchone()
+    finally:
+        conn.close()
+    return json.loads(row[0]) if row else None
+
+
 def test_sources_keep_separate_cursors(env):
     _run(env, "index", "--corpus", "alpha-chat", "--json")
-    state = json.loads(open(env.parent / "state.json").read())
-    assert state["alpha-chat"]["max_id"] == 2 and "beta-inbox" not in state
+    assert _cursor(env, "alpha-chat")["max_id"] == 2
+    assert _cursor(env, "beta-inbox") is None
     (again,) = _run(env, "index", "--corpus", "alpha-chat", "--json")
     assert again["docs_indexed"] == 0
+
+
+def test_cursor_follows_the_db(env, tmp_path):
+    scratch = tmp_path / "scratch.db"
+    _run(env, "index", "--corpus", "alpha-chat", "--json")
+    before = _cursor(env, "alpha-chat")
+    # A run against another DB must not touch A's cursor and starts empty.
+    (res,) = _run(scratch, "index", "--corpus", "alpha-chat", "--json")
+    assert res["docs_indexed"] == 2
+    assert _cursor(env, "alpha-chat") == before
+    # The shared legacy file is no longer written.
+    assert not (tmp_path / "state.json").exists()
+    # A fresh DB never inherits a cursor.
+    fresh = tmp_path / "fresh.db"
+    (res,) = _run(fresh, "index", "--corpus", "alpha-chat", "--json")
+    assert res["docs_indexed"] == 2
+
+
+def test_default_db_adopts_legacy_cursor_once(env, tmp_path, monkeypatch):
+    default = tmp_path / "default.db"
+    _run(default, "index", "--corpus", "alpha-chat", "--json")
+    import sqlite3
+
+    c = sqlite3.connect(str(default))
+    c.execute("DELETE FROM meta WHERE k LIKE 'connector_state:%'")
+    c.commit()
+    c.close()
+    (tmp_path / "state.json").write_text(
+        json.dumps({"alpha-chat": {"max_id": 2}})
+    )
+    # Default DB with docs: continues from the legacy cursor, nothing re-run.
+    (res,) = _run(default, "index", "--corpus", "alpha-chat", "--json")
+    assert res["docs_indexed"] == 0
+    assert _cursor(default, "alpha-chat")["max_id"] == 2
+    # A non-default or doc-less DB never adopts it.
+    (res,) = _run(tmp_path / "other.db", "index", "--corpus", "alpha-chat", "--json")
+    assert res["docs_indexed"] == 2
 
 
 def test_unknown_corpus_rejected(env, capsys):

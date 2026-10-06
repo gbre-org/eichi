@@ -489,13 +489,10 @@ def _print_hit(h, json_out: bool, raw_score: bool = False) -> str:
 # --- subcommand handlers -----------------------------------------------------
 
 
-def _connector_state_path() -> Path:
-    """Where the connector incremental cursor lives.
-
-    One JSON file, keyed by connector name. Per-connector slices keep
-    re-runs idempotent (only re-emit changed content). Configurable via
-    ``$EICHI_CONNECTOR_STATE``.
-    """
+def _legacy_state_path() -> Path:
+    """Old shared cursor file (one JSON for every DB), kept only so the
+    default DB can adopt its existing cursors once. Overridable via
+    ``$EICHI_CONNECTOR_STATE``."""
     override = os.environ.get("EICHI_CONNECTOR_STATE")
     if override:
         return Path(override).expanduser()
@@ -504,37 +501,62 @@ def _connector_state_path() -> Path:
     return base / "eichi" / "connector-state.json"
 
 
-def _load_connector_state(path: Path, key: str) -> dict:
-    if not path.exists():
+def _state_key(corpus: str) -> str:
+    return f"connector_state:{corpus}"
+
+
+def _is_default_db(db) -> bool:
+    if not db:
+        return True
+    try:
+        return Path(db).expanduser().resolve() == Path(DEFAULT_DB_PATH).resolve()
+    except OSError:
+        return False
+
+
+def _load_connector_state(conn, db, key: str) -> dict:
+    """Load the incremental cursor for a corpus from the index DB itself.
+
+    The cursor lives in the DB's ``meta`` table, so it always matches the
+    content actually indexed there: a scratch DB starts empty, and a
+    restored or replaced DB brings its own cursor back with it.
+
+    One-time migration: when the DB has no stored cursor yet, the default
+    DB adopts the slot from the legacy shared file, but only if that DB
+    already holds documents for the corpus (so an empty or replaced DB is
+    never handed a cursor that skips unindexed content).
+    """
+    row = conn.execute(
+        "SELECT v FROM meta WHERE k = ?", (_state_key(key),)
+    ).fetchone()
+    if row is not None:
+        try:
+            slot = json.loads(row[0])
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return slot if isinstance(slot, dict) else {}
+    if not _is_default_db(db):
         return {}
+    has_docs = conn.execute(
+        "SELECT 1 FROM files WHERE source = ? LIMIT 1", (key,)
+    ).fetchone()
+    if not has_docs:
+        return {}
+    path = _legacy_state_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    if not isinstance(data, dict):
-        return {}
-    slot = data.get(key)
+    slot = data.get(key) if isinstance(data, dict) else None
     return slot if isinstance(slot, dict) else {}
 
 
-def _save_connector_state(path: Path, key: str, state: dict) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            try:
-                full = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(full, dict):
-                    full = {}
-            except (OSError, json.JSONDecodeError):
-                full = {}
-        else:
-            full = {}
-        full[key] = state
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(full, default=str), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        pass
+def _save_connector_state(conn, key: str, state: dict) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)",
+        (_state_key(key), json.dumps(state, default=str)),
+    )
+    conn.commit()
 
 
 def _configured_connectors() -> dict:
@@ -593,7 +615,6 @@ def _cmd_index_corpus(args) -> int:
     from .store import add_chunks, sha256_text
 
     name = args.corpus
-    state_path = _connector_state_path()
     config = _load_corpus_config(name)
     configured = _configured_connectors()
     module = configured.get(name, name)
@@ -604,10 +625,10 @@ def _cmd_index_corpus(args) -> int:
             file=sys.stderr,
         )
         return 2
-    state = _load_connector_state(state_path, name)
 
     iter_docs = REGISTRY[module]
     conn = open_db(args.db)
+    state = _load_connector_state(conn, args.db, name)
     cur = conn.cursor()
 
     indexed = 0
@@ -689,7 +710,7 @@ def _cmd_index_corpus(args) -> int:
             print(f"indexed: {doc_id} ({n} chunks)", file=sys.stderr)
 
     if not args.dry_run:
-        _save_connector_state(state_path, name, state)
+        _save_connector_state(conn, name, state)
 
     payload = {
         "corpus": name,
