@@ -1,0 +1,18 @@
+# eichi-reindex — Linux cron fragment (alternative to the macOS launchd
+# agent in com.claude-watch.eichi-reindex.plist.template / see
+# docs/reindex-schedule.md for the systemd user-timer alternative).
+#
+# Install:
+#   ( crontab -l 2>/dev/null | grep -v scripts/eichi-reindex ; \
+#     sed "s#__REPO_ROOT__#$HOME/repos/eichi#g" scripts/crontab.eichi-reindex ) \
+#     | crontab -
+#
+# Verify:  crontab -l | grep eichi-reindex
+# Remove:  crontab -l | grep -v scripts/eichi-reindex | crontab -
+#
+# `eichi index` is delta-only + idempotent, so every-15-minutes is cheap —
+# an unchanged tick just walks + skips. The script truncates its own log
+# each run (~/.local/state/eichi-reindex.log by default), so cron's own
+# redirect here only needs to catch a hard crash before the script's
+# internal `exec >log 2>&1` takes over.
+*/15 * * * * __REPO_ROOT__/scripts/eichi-reindex >/tmp/eichi-reindex-cron.log 2>&1

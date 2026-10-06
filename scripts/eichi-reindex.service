@@ -1,0 +1,6 @@
+[Unit]
+Description=eichi delta reindex (one-shot, triggered by eichi-reindex.timer)
+
+[Service]
+Type=oneshot
+ExecStart=%h/repos/eichi/scripts/eichi-reindex

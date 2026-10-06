@@ -18,13 +18,16 @@ from . import EMBEDDING_DIM, EMBEDDING_MODEL, __version__
 from .chunk import chunk_text, detect_mode
 from .store import (
     DEFAULT_DB_PATH,
+    _like_prefix_pattern,
     add_chunks,
     ensure_fts_backfill,
     fts_count,
+    index_staleness,
     infer_source,
     list_files,
     needs_reindex,
     open_db,
+    paths_under,
     remove_path,
     search,
     search_bm25,
@@ -105,6 +108,55 @@ def _read(p: Path) -> Optional[str]:
         return p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+
+
+def _path_is_gone(path: str) -> bool:
+    """True only when `path` is PROVABLY absent from disk.
+
+    This is the prune predicate, and it is deliberately narrow.
+
+    * ``FileNotFoundError`` — nothing at that name. Gone.
+    * any other ``OSError`` (EACCES, EIO, ESTALE, ELOOP, ENOTDIR…) —
+      we could not answer the question. A failed probe is UNKNOWN, not
+      "deleted", so we keep the entry.
+
+    We use ``lstat`` rather than ``stat``/``os.path.exists`` for two
+    reasons: it does not require permission to read the symlink target,
+    and a dangling symlink counts as PRESENT (the name is still there;
+    the target may be an unmounted volume that will come back).
+
+    Note what this predicate is NOT: "absent from the current indexing
+    pass". The walk is filtered by extension, size and ignored
+    directory names, so plenty of live entries are never visited. Only
+    disk state may authorise a delete.
+    """
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _find_missing_paths(conn, root: Path) -> List[str]:
+    """Indexed paths under `root` whose files no longer exist on disk.
+
+    Scoped to the directory prefix: an entry outside `root` is never a
+    candidate, however stale it is — indexing a directory reconciles
+    that directory and nothing else.
+    """
+    root_str = str(root)
+    prefix = root_str if root_str.endswith(os.sep) else root_str + os.sep
+    missing: List[str] = []
+    for path in paths_under(conn, root_str):
+        # The SQL LIKE narrows; this confirms. Belt and braces before a
+        # delete.
+        if path != root_str and not path.startswith(prefix):
+            continue
+        if _path_is_gone(path):
+            missing.append(path)
+    return missing
 
 
 def _pick_hit_timestamp(h) -> tuple[Optional[float], str]:
@@ -702,11 +754,51 @@ def cmd_index(args) -> int:
         indexed += 1
         if args.verbose:
             print(f"indexed: {path_str} ({n} chunks)", file=sys.stderr)
+
+    # --- reconcile: drop entries whose files are gone from disk ---------
+    #
+    # `index` is otherwise delta-only: it adds and updates, never
+    # removes. Without this pass a renamed or deleted document keeps
+    # answering queries under its old name and with its old body — the
+    # index silently serves content that no longer exists.
+    #
+    # Only runs for a DIRECTORY index (a single-file index reconciles
+    # nothing but itself, which add_chunks already does) and only within
+    # the indexed prefix.
+    pruned_paths: List[str] = []
+    pruned_chunks = 0
+    prune_skipped: Optional[str] = None
+    if root.is_dir() and not getattr(args, "no_prune", False):
+        missing = _find_missing_paths(conn, root)
+        if missing and not candidates:
+            # The walk found nothing indexable, yet the DB has entries
+            # here. That is what an unmounted volume / wrong path looks
+            # like, and pruning would wipe a live corpus. Refuse and say
+            # so — an explicit `eichi rm` is the way to empty a tree.
+            prune_skipped = "no-eligible-files-found-in-walk"
+            print(
+                f"eichi: NOT pruning {len(missing)} missing entries under "
+                f"{root}: the walk found no indexable files at all "
+                "(unmounted volume? wrong path?). Re-run once the tree is "
+                f"readable, or remove them explicitly with `eichi rm {root}`.",
+                file=sys.stderr,
+            )
+        elif missing and args.dry_run:
+            pruned_paths = missing
+        elif missing:
+            for path in missing:
+                pruned_chunks += remove_path(conn, path)
+            pruned_paths = missing
+
     payload = {
         "root": str(root),
         "files_indexed": indexed,
         "files_skipped_clean": skipped,
         "chunks_added": new_chunks,
+        "files_pruned": len(pruned_paths),
+        "chunks_pruned": pruned_chunks,
+        "pruned_paths": pruned_paths,
+        "prune_skipped": prune_skipped,
         "dry_run": bool(args.dry_run),
     }
     if args.json:
@@ -715,8 +807,32 @@ def cmd_index(args) -> int:
         print(
             f"indexed {indexed} files ({new_chunks} chunks), "
             f"skipped {skipped} clean files"
+            + (
+                (
+                    f", would prune {len(pruned_paths)} missing files"
+                    if args.dry_run
+                    else f", pruned {len(pruned_paths)} missing files "
+                    f"({pruned_chunks} chunks)"
+                )
+                if pruned_paths
+                else ""
+            )
             + (" [DRY RUN]" if args.dry_run else "")
         )
+    # Name what was removed. A silent prune is as bad as a silent no-op,
+    # so the paths go to stderr even without -v; long lists are elided
+    # unless the caller asked for verbose.
+    if pruned_paths:
+        label = "[dry-run] would prune" if args.dry_run else "pruned (missing)"
+        shown = pruned_paths if args.verbose else pruned_paths[:20]
+        for path in shown:
+            print(f"{label}: {path}", file=sys.stderr)
+        if len(shown) < len(pruned_paths):
+            print(
+                f"{label}: … and {len(pruned_paths) - len(shown)} more "
+                "(-v to list all)",
+                file=sys.stderr,
+            )
     return 0
 
 
@@ -1170,6 +1286,10 @@ def cmd_reindex(args) -> int:
             verbose=args.verbose,
             dry_run=args.dry_run,
             db=args.db,
+            # reindex already wiped the prefix, so the reconcile pass has
+            # nothing to find; leave it enabled anyway so both entry
+            # points behave identically under --dry-run.
+            no_prune=False,
         )
         rc = cmd_index(sub)
         if not args.json:
@@ -1228,14 +1348,25 @@ def cmd_ls(args) -> int:
 
 
 def cmd_rm(args) -> int:
+    doc_id = getattr(args, "doc_id", None)
+    if doc_id:
+        # Synthetic ids from streamed connector docs (e.g.
+        # "repo-md:<repo>:<relpath>") are not filesystem paths — resolving
+        # them would prepend the cwd and match nothing. Use them verbatim.
+        target = doc_id
+    elif args.path:
+        target = str(Path(args.path).expanduser().resolve())
+    else:
+        print("eichi: rm needs a path or --doc-id", file=sys.stderr)
+        return 2
     conn = open_db(args.db)
-    target = str(Path(args.path).expanduser().resolve())
     if args.dry_run:
         # Count what would be removed without changing anything.
         cur = conn.cursor()
         n = cur.execute(
-            "SELECT COUNT(*) FROM chunk_meta WHERE path = ? OR path LIKE ?",
-            (target, target.rstrip("/") + "/%"),
+            "SELECT COUNT(*) FROM chunk_meta "
+            "WHERE path = ? OR path LIKE ? ESCAPE '\\'",
+            (target, _like_prefix_pattern(target)),
         ).fetchone()[0]
         if args.json:
             print(json.dumps({"would_remove_chunks": n, "path": target}))
@@ -1265,12 +1396,14 @@ def build_parser() -> argparse.ArgumentParser:
             Embedding model: {EMBEDDING_MODEL} (dim={EMBEDDING_DIM})
 
             Subcommands:
-              index    Index a file or directory (idempotent, delta-only).
+              index    Index a file or directory (idempotent; delta-only
+                       for content, reconciling for deletions).
               query    Search the index. Top-K results.
               reindex  Wipe and rebuild for a path or the entire DB.
               stats    Show row count, sources, last-indexed time.
               ls       List indexed files (debug).
-              rm       Remove a file or directory from the index.
+              rm       Remove a file or directory (or a --doc-id) from
+                       the index.
             """
         ),
     )
@@ -1289,6 +1422,16 @@ def build_parser() -> argparse.ArgumentParser:
             Two forms:
               eichi index <path>             — walk a filesystem tree
               eichi index --corpus <name>    — run a named connector
+
+            Indexing a DIRECTORY also reconciles it: index entries under
+            that directory whose files no longer exist on disk are
+            removed, so a renamed or deleted document stops answering
+            queries under its old name. Entries are only removed when the
+            path is provably absent (an lstat that raises ENOENT) — never
+            merely because the walk skipped them, which it does for
+            unsupported extensions, oversized files and ignored dirs.
+            Pass --no-prune to disable. Indexing a single FILE, or a
+            --corpus, prunes nothing.
 
             Connectors shipped with eichi:
               claude-jsonl         Claude Code session JSONL transcripts
@@ -1313,6 +1456,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pi.add_argument("-v", "--verbose", action="store_true")
     pi.add_argument("-n", "--dry-run", action="store_true")
+    pi.add_argument(
+        "--no-prune",
+        action="store_true",
+        help=(
+            "directory mode only: keep index entries whose files no "
+            "longer exist on disk (default is to remove them)"
+        ),
+    )
     pi.add_argument(
         "--force",
         action="store_true",
@@ -1466,9 +1617,40 @@ def build_parser() -> argparse.ArgumentParser:
     pm = sub.add_parser(
         "rm",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        help="Remove a file/dir from the index",
+        help="Remove a file/dir (or a doc-id) from the index",
+        description=textwrap.dedent(
+            """\
+            Remove indexed documents.
+
+            Two forms:
+
+              eichi rm <path>              a file or directory, resolved
+                                           against the cwd; everything under
+                                           a directory goes too.
+              eichi rm --doc-id <id>       a literal indexed id, used as-is.
+                                           This is the form for streamed
+                                           connector documents, whose ids
+                                           ("repo-md:<repo>:<relpath>") are
+                                           not filesystem paths.
+
+            Exactly one of the two is required.
+            """
+        ),
     )
-    pm.add_argument("path")
+    grp = pm.add_mutually_exclusive_group()
+    grp.add_argument(
+        "path",
+        nargs="?",
+        help="filesystem path to remove (resolved against the cwd)",
+    )
+    grp.add_argument(
+        "--doc-id",
+        help=(
+            "remove a document by its literal indexed id instead of a path "
+            "— used for streamed connector docs whose id is not a file "
+            "(e.g. 'repo-md:<repo>:<relpath>'). Taken verbatim, not resolved."
+        ),
+    )
     pm.add_argument("-n", "--dry-run", action="store_true")
     pm.add_argument("--json", action="store_true")
     pm.set_defaults(func=cmd_rm)
@@ -1476,9 +1658,37 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _warn_if_stale(db_path) -> None:
+    """Print a loud stderr banner if the on-disk index is stale.
+
+    Best-effort and never raises: a probe failure must never block the
+    actual command. Written to stderr so it never corrupts --json stdout.
+    """
+    try:
+        conn = open_db(db_path)
+        try:
+            info = index_staleness(conn)
+        finally:
+            conn.close()
+    except Exception:
+        return
+    if not info.get("stale_index"):
+        return
+    warning = info.get("warning") or "EICHI INDEX STALE"
+    bar = "!" * 76
+    print(bar, file=sys.stderr)
+    print(f"⚠️  {warning}", file=sys.stderr)
+    print(bar, file=sys.stderr)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Loud, unmissable stale-index warning on EVERY invocation that reads the
+    # index (all commands except the ones that (re)build it). See
+    # eichi.store.index_staleness for the shared threshold + computation.
+    if getattr(args, "func", None) not in (cmd_index, cmd_index_stream):
+        _warn_if_stale(getattr(args, "db", None))
     return args.func(args)
 
 

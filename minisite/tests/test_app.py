@@ -1344,3 +1344,159 @@ def test_sources_for_role_unknown_returns_empty_set():
     assert search_app.sources_for_role("supersecret") == set()
     assert search_app.sources_for_role("") == set()
 
+
+# ----------------------------------------------------------------------
+# /api/sources endpoint + DB-distinct fallback (source-dropdown fix).
+#
+# Root cause being pinned here: the dropdown used to be built ONLY from
+# the local sources.toml allowlist. On an un-configured instance that
+# config is absent, so SOURCES_BY_ROLE is empty, every role got an empty
+# set, and the dropdown listed nothing — which is exactly the
+# "transcripts disappeared again" symptom (transcripts is a real corpus
+# source but was never in the config). The fix derives the dropdown from
+# a GLOBAL `SELECT DISTINCT source` over the index when no config
+# restricts access, exposed via GET /api/sources.
+# ----------------------------------------------------------------------
+
+
+def test_api_sources_lists_role_allowed_sources(client):
+    """With a populated config, /api/sources mirrors the role allowlist."""
+    r = client.get("/api/sources", headers={"X-Auth-Role": "search-user"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert sorted(body["sources"]) == sorted(SEARCH_USER_SOURCES)
+    # Sorted for stable dropdown ordering.
+    assert body["sources"] == sorted(body["sources"])
+
+
+def test_api_sources_admin_sees_all(client):
+    r = client.get("/api/sources", headers={"X-Auth-Role": "admin"})
+    assert r.status_code == 200
+    assert set(r.get_json()["sources"]) == set(search_app.ALL_SOURCES)
+
+
+def test_sources_for_role_no_config_falls_back_to_db(monkeypatch):
+    """No local config → expose the global DB distinct-source set.
+
+    This is the single-operator default. Without the fallback the
+    dropdown is empty and every ?source= 403s.
+    """
+    monkeypatch.setattr(search_app, "SOURCES_BY_ROLE", {})
+    monkeypatch.setattr(search_app, "ALL_SOURCES", set())
+    monkeypatch.setattr(
+        search_app,
+        "_read_db_sources",
+        lambda: {"transcripts", "claude-jsonl", "memory"},
+    )
+    # ANY role (no restriction is configured) sees the real corpus.
+    for role in ("search-user", "admin", "anything"):
+        assert search_app.sources_for_role(role) == {
+            "transcripts",
+            "claude-jsonl",
+            "memory",
+        }
+
+
+def test_api_sources_no_config_returns_db_sources(client, monkeypatch):
+    monkeypatch.setattr(search_app, "SOURCES_BY_ROLE", {})
+    monkeypatch.setattr(search_app, "ALL_SOURCES", set())
+    monkeypatch.setattr(
+        search_app,
+        "_read_db_sources",
+        lambda: {"transcripts", "claude-jsonl", "memory"},
+    )
+    r = client.get("/api/sources")
+    assert r.status_code == 200
+    assert r.get_json()["sources"] == ["claude-jsonl", "memory", "transcripts"]
+
+
+def test_admin_wildcard_unions_db_sources(monkeypatch):
+    """Admin wildcard surfaces a freshly-indexed source not yet in config."""
+    monkeypatch.setattr(search_app, "SOURCES_BY_ROLE", {"admin": {"*"}})
+    monkeypatch.setattr(search_app, "ALL_SOURCES", {"declared-source"})
+    monkeypatch.setattr(
+        search_app, "_read_db_sources", lambda: {"declared-source", "new-source"}
+    )
+    assert search_app.sources_for_role("admin") == {
+        "declared-source",
+        "new-source",
+    }
+
+
+# ----------------------------------------------------------------------
+# stale-index surface (stale_index / index_age_days / index_warning)
+# ----------------------------------------------------------------------
+
+
+def _stub_stale(monkeypatch, *, stale, age=None, warning=None, last="x"):
+    monkeypatch.setattr(
+        search_app,
+        "_index_staleness",
+        lambda: {
+            "stale_index": stale,
+            "index_age_days": age,
+            "last_indexed": last,
+            "threshold_days": 7.0,
+            "warning": warning,
+        },
+    )
+
+
+def test_search_response_includes_stale_fields_when_stale(client, monkeypatch):
+    _stub_stale(
+        monkeypatch,
+        stale=True,
+        age=80.0,
+        warning="EICHI INDEX STALE: last indexed 2026-06-27",
+        last="2026-06-27 00:00:00",
+    )
+    body = client.get("/api/search?q=test").get_json()
+    assert body["stale_index"] is True
+    assert body["index_age_days"] == 80.0
+    assert body["index_last_indexed"] == "2026-06-27 00:00:00"
+    assert "EICHI INDEX STALE" in body["index_warning"]
+
+
+def test_search_response_stale_fields_when_fresh(client, monkeypatch):
+    _stub_stale(monkeypatch, stale=False, age=0.5, warning=None)
+    body = client.get("/api/search?q=test").get_json()
+    assert body["stale_index"] is False
+    assert body["index_warning"] is None
+
+
+def test_empty_query_and_error_still_carry_stale_fields(client, monkeypatch):
+    _stub_stale(monkeypatch, stale=True, age=80.0, warning="stale!")
+    empty = client.get("/api/search?q=").get_json()
+    assert empty["stale_index"] is True and empty["index_warning"] == "stale!"
+    err = client.get("/api/search?q=x&k=notint").get_json()
+    assert err["stale_index"] is True and err["index_warning"] == "stale!"
+
+
+def test_index_staleness_probe_reads_db(tmp_path, monkeypatch):
+    import datetime
+    import sqlite3
+    import time
+
+    db = tmp_path / "index.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE files(path TEXT, indexed_at TEXT)")
+    old = datetime.datetime.utcfromtimestamp(time.time() - 80 * 86400).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    conn.execute("INSERT INTO files VALUES ('p', ?)", (old,))
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(search_app, "EICHI_DB", str(db))
+    info = search_app._index_staleness()
+    assert info["stale_index"] is True
+    assert 79.0 <= info["index_age_days"] <= 81.0
+    assert "EICHI INDEX STALE" in info["warning"]
+
+
+def test_index_staleness_probe_missing_db_is_not_stale(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_app, "EICHI_DB", str(tmp_path / "nope.db"))
+    info = search_app._index_staleness()
+    assert info["stale_index"] is False
+    assert info["last_indexed"] is None
+

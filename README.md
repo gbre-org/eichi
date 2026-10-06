@@ -74,17 +74,62 @@ too.
 ## Subcommands
 
 ```
-eichi index <path>       Index a file or directory (idempotent, delta-only)
+eichi index <path>       Index a file or directory (idempotent; delta-only for
+                         content, reconciling for deletions)
 eichi index-stream       Index JSONL docs from stdin (connector input)
 eichi query <q> [-k N]   Search; print top-K results
 eichi reindex [<path>]   Wipe + rebuild for path or full DB
 eichi stats              Row count, sources, last-indexed time
 eichi ls [<source>]      List indexed files
 eichi rm <path>          Remove a file or directory from the index
+eichi rm --doc-id <id>   Remove one document by its literal indexed id
 ```
 
 All subcommands support `--json` for machine output. `index | reindex | rm`
 support `-n` (dry run) and `-v` (verbose).
+
+### Removing streamed documents
+
+`eichi rm <path>` resolves its argument against the cwd, which is right for
+files but wrong for documents that arrived through `index-stream`: a connector
+id such as `repo-md:<repo>:<relpath>` is not a filesystem path, and resolving
+it produces `$PWD/repo-md:...`, which matches nothing. Pass such ids as
+`eichi rm --doc-id <id>` — the value is used verbatim. The two forms are
+mutually exclusive and one of them is required; `-n` works with both.
+
+### Indexing a directory reconciles it
+
+Re-indexing a **directory** does two things: it re-embeds files whose content
+changed (the delta pass), and it removes index entries under that directory
+whose files no longer exist on disk (the reconcile pass). Without the second
+half a renamed or deleted document keeps answering queries under its old name
+and with its old body — the index quietly serves content that isn't there any
+more.
+
+The reconcile pass is deliberately conservative:
+
+- An entry is removed only when its path is **provably absent** — an `lstat`
+  that raises `ENOENT`. Any other error (permission denied, I/O error, stale
+  handle) means "unknown", and the entry is kept. A failed probe is not
+  evidence of deletion.
+- "Not visited by this pass" is **never** grounds for removal. The walk skips
+  unsupported extensions, files over 5 MB and ignored directories (`.git`,
+  `.venv`, `__pycache__`, `node_modules`), and those entries stay put.
+- A dangling symlink counts as present — the name is still there, and the
+  target may be a volume that comes back.
+- Only paths under the indexed directory are considered.
+- If the walk finds **no** indexable files at all but the index has entries
+  under that directory, the prune is skipped with a warning. That is what an
+  unmounted volume looks like from the walker's side; emptying a tree on
+  purpose is what `eichi rm <path>` is for.
+
+Removals are reported: a count in the summary line, the paths on stderr (all
+of them under `-v`), and `files_pruned` / `chunks_pruned` / `pruned_paths` /
+`prune_skipped` in `--json`. Use `-n` to see what would go without touching
+the DB, or `--no-prune` to turn the pass off.
+
+Indexing a single **file**, or a `--corpus` connector, prunes nothing —
+connectors own their own document lifecycle.
 
 ## Configuration
 
@@ -97,6 +142,12 @@ use. For a canonical list of corpora to re-index on a schedule, drop a
 - `~/.config/eichi/eichi.toml`
 
 See [`eichi.toml.example`](./eichi.toml.example) for the format.
+
+**Keeping the index fresh automatically**: `eichi index` is delta-only and
+idempotent, so a recurring job is cheap to run. See
+[`docs/reindex-schedule.md`](./docs/reindex-schedule.md) for a ready-made
+job ([`scripts/eichi-reindex`](./scripts/eichi-reindex)) plus the launchd /
+cron / systemd-timer wiring to run it every 15 minutes.
 
 Other environment variables:
 
@@ -122,7 +173,7 @@ defaults: [`minisite/README.md`](./minisite/README.md).
 | `SEARCH_SITE_LOGO_URL` | *(empty)* | Header logo `<img>` src. Absolute URL or `/static/…` path. Empty = no logo. |
 | `SEARCH_SITE_LOGO_DEFAULT` | *(empty)* | Set to `1` to render the bundled `static/eichi-logo.png` when `SEARCH_SITE_LOGO_URL` is empty. |
 | `SEARCH_SITE_BRAND` | *(empty)* | Optional brand string appended to the footer. |
-| `SEARCH_SITE_FAVICON_URL` | *(empty)* | Favicon override. Empty = use the bundled generic favicon. |
+| `SEARCH_SITE_FAVICON_URL` | *(empty)* | Favicon override. Empty = use the bundled generic favicons in `minisite/static/branding/`. |
 | `SEARCH_DEFAULT_K` | `20` | Default top-K. |
 | `SEARCH_MAX_K` | `100` | Max top-K accepted via query string. |
 | `SEARCH_QUERY_TIMEOUT` | `30` | Per-query wall-clock cap (seconds). |
@@ -132,6 +183,13 @@ defaults: [`minisite/README.md`](./minisite/README.md).
 image-gen-generated abstract glyph (white on dark), fair-use safe (no
 third-party brand IP). Opt in via `SEARCH_SITE_LOGO_DEFAULT=1`, or
 ignore and ship your own via `SEARCH_SITE_LOGO_URL`.
+
+**Replacing the whole icon set**: the favicons live in
+`minisite/static/branding/`, a folder that holds nothing else, so a deploy can
+override every one of them by mounting one read-only directory over
+`static/branding` — see [`minisite/README.md`](minisite/README.md) for why that
+shape (and not per-file mounts, and not a mount over `static/`) is the only
+safe one.
 
 ### Source map configuration
 

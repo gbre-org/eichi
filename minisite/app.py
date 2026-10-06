@@ -72,16 +72,14 @@ try:
 except ImportError:  # pragma: no cover — defensive for partial venvs
     _sources_mod = None  # type: ignore[assignment]
 
-# eichi interpreter + worker script. The interpreter lives in the
-# bind-mounted host venv (see Dockerfile + the docker-compose snippet
-# in the README); the worker script is bundled into the image
-# alongside app.py.
-#
-# Both paths MUST be provided by the operator via env vars — there is
-# no sensible default for a venv path inside a container, and a
-# silent fallback would mask deployment bugs. EICHI_DB falls back to
-# eichi's own default-resolution rules (see eichi.store.default_db_path)
-# if unset.
+# eichi interpreter + worker script. Since the Dockerfile now installs
+# eichi + its ML deps directly, the default EICHI_PYTHON is the
+# container's own python (sys.executable). An operator can still
+# override via env var to point at a different interpreter if desired.
+# EICHI_DB falls back to eichi's own default-resolution rules (see
+# eichi.store.default_db_path) if unset.
+import sys
+
 EICHI_PYTHON = os.environ.get("EICHI_PYTHON")
 EICHI_DB = os.environ.get("EICHI_DB", "")
 WORKER_SCRIPT = os.environ.get("EICHI_WORKER", "/app/eichi_worker.py")
@@ -92,6 +90,10 @@ WORKER_SCRIPT = os.environ.get("EICHI_WORKER", "/app/eichi_worker.py")
 # should set ``EICHI_*``.
 if not EICHI_PYTHON:
     EICHI_PYTHON = os.environ.get("VSEARCH_PYTHON", "")
+if not EICHI_PYTHON:
+    # Default to the container's own python — eichi deps are installed
+    # in the image, no external venv needed.
+    EICHI_PYTHON = sys.executable
 if not EICHI_DB:
     EICHI_DB = os.environ.get("VSEARCH_DB", "")
 
@@ -112,7 +114,17 @@ SITE_TITLE = os.environ.get("SEARCH_SITE_TITLE", "eichi search")
 #   SEARCH_SITE_BRAND       — short brand string rendered in the
 #                             footer. Empty = no brand text.
 #   SEARCH_SITE_FAVICON_URL — favicon override. Empty = use the
-#                             bundled generic favicon.
+#                             bundled generic favicons in
+#                             static/branding/.
+#
+# The favicon set lives in static/BRANDING/ rather than static/ itself so a
+# deploy can replace every brand asset with ONE read-only folder mount over
+# static/branding. Mounting the files one by one pins each host inode (an
+# atomic rewrite on the host then never reaches the container), and mounting
+# static/ would shadow this app's own frontend — search.js, style.css, the
+# vendored morphdom — right out of the image. static/eichi-logo.png stays
+# OUTSIDE that folder deliberately: it is the app's own default logo, not a
+# brand slot for a deploy to overwrite.
 SITE_LOGO_URL = os.environ.get("SEARCH_SITE_LOGO_URL", "").strip()
 SITE_BRAND = os.environ.get("SEARCH_SITE_BRAND", "").strip()
 SITE_FAVICON_URL = os.environ.get("SEARCH_SITE_FAVICON_URL", "").strip()
@@ -178,18 +190,72 @@ SOURCES_BY_ROLE: dict[str, set[str]] = (
 )
 
 
+def _read_db_sources() -> set[str]:
+    """Return every distinct ``source`` tag actually present in the index.
+
+    This is the GLOBAL corpus source universe — a ``SELECT DISTINCT
+    source`` over the eichi DB, NOT a facet of the latest result set.
+    The source filter dropdown is populated from this so it lists the
+    real corpus (e.g. ``transcripts``, ``memory``, ``claude-jsonl``)
+    regardless of what any single query happened to return.
+
+    Both ``files`` and ``chunk_meta`` are unioned: ``files`` is the
+    canonical per-document table, but a connector can leave ``chunk_meta``
+    rows whose ``files`` row was pruned, so unioning catches every tag a
+    ``?source=`` filter could legitimately match.
+
+    Opened read-only and closed immediately (the DB is shared with the
+    host eichi CLI / index-tick driver). Any failure (DB missing, table
+    absent, SQL error) returns an empty set — the caller treats that as
+    "no DB-derived sources" and falls back to the configured allowlist.
+    """
+    if not EICHI_DB:
+        return set()
+    try:
+        uri = f"file:{EICHI_DB}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+        try:
+            rows = conn.execute(
+                "SELECT source FROM files "
+                "UNION "
+                "SELECT source FROM chunk_meta"
+            ).fetchall()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return set()
+    return {str(r[0]) for r in rows if r and r[0]}
+
+
 def sources_for_role(role: str) -> set[str]:
     """Return the set of source tags ``role`` is allowed to query.
 
-    Unknown / missing roles → empty set (deny everything). The role
-    parameter is whatever ``X-Auth-Role`` carried; the auth-gate defaults
-    a missing claim to ``search-user`` upstream, so an empty set here
-    means "not even search-user" (e.g. an attacker spoofing a typo'd
-    role header through a misconfigured proxy).
+    Resolution order:
+
+    * If a local ``sources.toml`` config declares any sources/roles
+      (``SOURCES_BY_ROLE`` non-empty), honor the per-role allowlist
+      exactly — admin via the ``"*"`` wildcard expands to ``ALL_SOURCES``,
+      other roles get their explicit ids. This preserves the
+      restricted-access feature for multi-tenant deploys.
+    * If NO config is present (``SOURCES_BY_ROLE`` empty — the
+      single-operator default), there is no restriction to enforce, so
+      every role sees the GLOBAL distinct-source set read straight from
+      the index DB. Without this fallback the source dropdown is empty
+      (and every ``?source=`` 403s) on an un-configured instance, which
+      is the bug the operator hit ("transcripts disappeared again").
+
+    Unknown / missing roles under a populated config → empty set (deny
+    everything).
     """
+    # Un-configured instance: expose the real corpus rather than nothing.
+    if not SOURCES_BY_ROLE:
+        return _read_db_sources()
     allowed = SOURCES_BY_ROLE.get(role, set())
     if "*" in allowed:
-        return set(ALL_SOURCES)
+        # Admin wildcard. Expand to the configured universe UNION whatever
+        # the index actually holds, so a freshly-indexed source that the
+        # operator hasn't yet declared in sources.toml is still reachable.
+        return set(ALL_SOURCES) | _read_db_sources()
     return set(allowed)
 
 
@@ -677,6 +743,25 @@ def index() -> str:
     )
 
 
+@app.route("/api/sources")
+def api_sources() -> Any:
+    """Return the source tags this role may filter on, for the dropdown.
+
+    The frontend fetches this ONCE on page load and rebuilds the source
+    ``<select>`` from it. The list is the GLOBAL distinct-source set (see
+    ``sources_for_role`` / ``_read_db_sources``) — NOT derived from the
+    current result set — so a query that returns no hits for a given
+    source never makes that source vanish from the dropdown.
+
+    Honors the same per-role authorisation as ``/api/search``: a
+    restricted role only sees its allowed sources. JSON envelope:
+    ``{"ok": true, "sources": ["claude-jsonl", "memory", ...]}``.
+    """
+    role = (request.headers.get("X-Auth-Role") or "").strip() or "search-user"
+    role_sources = sources_for_role(role)
+    return jsonify({"ok": True, "sources": sorted(role_sources)})
+
+
 def _parse_year(value: str | None, label: str) -> tuple[int | None, str | None]:
     """Return ``(year, error)`` for a year query param.
 
@@ -701,6 +786,75 @@ def _parse_year(value: str | None, label: str) -> tuple[int | None, str | None]:
     return year, None
 
 
+# Loud stale-index surface for the web API. The threshold mirrors
+# eichi.store._stale_threshold_days (default 7d, env EICHI_STALE_DAYS) so the
+# CLI banner and the API's stale_index/index_age_days always agree. Computed
+# here with stdlib sqlite3 ONLY — this Flask process deliberately does not
+# import eichi + its heavy ML deps (those live in the worker venv).
+try:
+    STALE_INDEX_THRESHOLD_DAYS = float(os.environ.get("EICHI_STALE_DAYS", "") or 7.0)
+    if STALE_INDEX_THRESHOLD_DAYS <= 0:
+        STALE_INDEX_THRESHOLD_DAYS = 7.0
+except ValueError:
+    STALE_INDEX_THRESHOLD_DAYS = 7.0
+
+
+def _resolve_index_db_path() -> "str | None":
+    """Resolve the sqlite index path the same way eichi.store does."""
+    if EICHI_DB:
+        return EICHI_DB
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = xdg or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "eichi", "index.db")
+
+
+def _index_staleness() -> "dict[str, Any]":
+    """Cheap stdlib-only index-freshness probe for the API response.
+
+    Returns keys: stale_index (bool), index_age_days (float|None),
+    last_indexed (str|None), threshold_days (float), warning (str|None).
+    Best-effort: any error yields a non-stale ("unknown") result so the
+    search path is never broken by the freshness probe.
+    """
+    info = {
+        "stale_index": False,
+        "index_age_days": None,
+        "last_indexed": None,
+        "threshold_days": STALE_INDEX_THRESHOLD_DAYS,
+        "warning": None,
+    }
+    db = _resolve_index_db_path()
+    if not db or not os.path.exists(db):
+        return info
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT MAX(indexed_at), "
+                "CAST(strftime('%s', MAX(indexed_at)) AS REAL) FROM files"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return info
+    if not row or row[1] is None:
+        return info
+    last_indexed = row[0]
+    last_unix = float(row[1])
+    age_days = max(0.0, (time.time() - last_unix) / 86400.0)
+    info["last_indexed"] = last_indexed
+    info["index_age_days"] = round(age_days, 2)
+    if age_days >= STALE_INDEX_THRESHOLD_DAYS:
+        info["stale_index"] = True
+        info["warning"] = (
+            f"EICHI INDEX STALE: last indexed {last_indexed} "
+            f"({age_days:.0f}d ago, threshold {STALE_INDEX_THRESHOLD_DAYS:.0f}d) "
+            f"— results may be missing recent data; re-index with "
+            f"`eichi index <path>`"
+        )
+    return info
+
+
 @app.route("/api/search")
 def api_search() -> Any:
     raw_query = (request.args.get("q") or "").strip()
@@ -708,6 +862,10 @@ def api_search() -> Any:
     raw_source = (request.args.get("source") or "").strip() or None
     raw_added_since = (request.args.get("added_since") or "").strip() or None
     raw_retrieval = (request.args.get("retrieval") or "").strip() or None
+
+    # Loud stale-index surface: one cheap stdlib probe per request, merged
+    # into every response shape below so callers ALWAYS see index freshness.
+    stale = _index_staleness()
 
     # Build a default error envelope so each early-return branch has a
     # consistent shape — keeps the JSON contract stable for the UI.
@@ -726,6 +884,10 @@ def api_search() -> Any:
                     "added_since": raw_added_since,
                     "retrieval": raw_retrieval,
                     "elapsed_ms": 0,
+                    "stale_index": stale["stale_index"],
+                    "index_age_days": stale["index_age_days"],
+                    "index_last_indexed": stale["last_indexed"],
+                    "index_warning": stale["warning"],
                 }
             ),
             status,
@@ -800,6 +962,10 @@ def api_search() -> Any:
                 "added_since": raw_added_since,
                 "retrieval": retrieval,
                 "elapsed_ms": 0,
+                "stale_index": stale["stale_index"],
+                "index_age_days": stale["index_age_days"],
+                "index_last_indexed": stale["last_indexed"],
+                "index_warning": stale["warning"],
                 "error": None,
             }
         )
@@ -863,6 +1029,10 @@ def api_search() -> Any:
             "added_since": raw_added_since,
             "retrieval": retrieval,
             "elapsed_ms": elapsed_ms,
+            "stale_index": stale["stale_index"],
+            "index_age_days": stale["index_age_days"],
+            "index_last_indexed": stale["last_indexed"],
+            "index_warning": stale["warning"],
             "error": err,
         }
     )

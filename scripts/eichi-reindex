@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# eichi-reindex — recurring reindex worker, intended to be run on a schedule
+# (launchd StartInterval / cron / systemd timer — see
+# scripts/com.claude-watch.eichi-reindex.plist for the macOS launchd unit).
+#
+# `eichi index` is delta-only and idempotent (re-embeds only changed/new
+# files, by mtime+hash), so running this every 15 minutes is cheap: a tick
+# with nothing changed just walks + skips.
+#
+# WHAT this reindexes — kept generic/service-agnostic on purpose (this is a
+# public repo; no personal paths are hardcoded here):
+#
+#   1. Every filesystem corpus declared in the local eichi.toml
+#      ([[corpus]] blocks — see eichi.toml.example). The config file is
+#      resolved by eichi itself ($EICHI_CONFIG / $XDG_CONFIG_HOME/eichi/
+#      eichi.toml / ~/.config/eichi/eichi.toml) and is host-local, NOT
+#      committed — it's where YOUR personal corpus paths live.
+#   2. Every connector shipped with eichi (`eichi index --corpus <name>`,
+#      currently claude-jsonl + claude-watch-queue). Both no-op gracefully
+#      when their underlying paths are absent, so this is safe to run on
+#      any machine, configured or not.
+#
+# This script intentionally does NOT walk ad-hoc per-session directories
+# (e.g. per-session subagent-transcript dirs) or archive files that need
+# bespoke discovery logic — that kind of deployment-specific housekeeping
+# belongs in a wrapper you keep next to your own corpus (point a [[corpus]]
+# entry at it, or chain a second script after this one from your scheduler
+# unit). Keeping this script corpus/connector-driven only is what keeps it
+# safe to publish and reuse across machines.
+#
+# Resolves `eichi` the same way bin/eichi does: via this script's own
+# location, so a relocated clone or a symlinked invocation still finds the
+# right venv. Falls back to PATH if the repo-relative binary isn't present
+# (e.g. this script copied elsewhere; set EICHI_BIN to override explicitly).
+#
+# Logs to ~/.local/state/eichi-reindex.log by default (truncated each run —
+# the log reflects only the latest tick). Override via EICHI_REINDEX_LOG.
+#
+# Dismantle: see scripts/com.claude-watch.eichi-reindex.plist's header, or
+# docs/reindex-cron.md.
+
+set -uo pipefail
+
+# Resolve symlinks to find the real script directory (mirrors bin/eichi).
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+script_dir="$(cd -P "$(dirname "$src")" && pwd)"
+repo_root="$(cd -P "$script_dir/.." && pwd)"
+
+LOG="${EICHI_REINDEX_LOG:-$HOME/.local/state/eichi-reindex.log}"
+mkdir -p "$(dirname "$LOG")"
+exec >"$LOG" 2>&1
+
+# Detached/launchd invocations get a minimal PATH; widen it so `eichi` (if
+# installed as a PATH shim, e.g. ~/.local/bin/eichi) and homebrew tools
+# resolve.
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
+if [ -n "${EICHI_BIN:-}" ]; then
+  EICHI="$EICHI_BIN"
+elif [ -x "$repo_root/bin/eichi" ]; then
+  EICHI="$repo_root/bin/eichi"
+elif command -v eichi >/dev/null 2>&1; then
+  EICHI="$(command -v eichi)"
+else
+  echo "eichi-reindex: cannot find eichi at $repo_root/bin/eichi or on PATH" >&2
+  exit 1
+fi
+
+VENV_PY="$repo_root/.venv/bin/python"
+
+rc=0
+run() {
+  echo "+ $*"
+  "$@" || rc=1
+}
+
+echo "=== eichi-reindex starting ($(date -u +%FT%TZ)) using $EICHI ==="
+
+# --- 1. Filesystem corpora declared in eichi.toml -------------------------
+if [ -x "$VENV_PY" ]; then
+  corpora="$("$VENV_PY" -c '
+from eichi.config import load
+for c in load().corpora:
+    print(c.path)
+' 2>/dev/null)"
+  if [ -n "$corpora" ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      run "$EICHI" index "$path"
+    done <<<"$corpora"
+  else
+    echo "(no [[corpus]] entries configured — see eichi.toml.example)"
+  fi
+else
+  echo "eichi-reindex: venv python not found at $VENV_PY — skipping config-driven corpora" >&2
+  rc=1
+fi
+
+# --- 2. Built-in connectors ------------------------------------------------
+run "$EICHI" index --corpus claude-jsonl
+run "$EICHI" index --corpus claude-watch-queue
+
+echo "=== eichi-reindex done (rc=$rc) at $(date -u +%FT%TZ) ==="
+exit "$rc"

@@ -171,6 +171,74 @@ def test_remove_path_prefix(db):
     assert s["file_count"] == 1
 
 
+def _add(db, path, seed):
+    add_chunks(
+        db,
+        source="test",
+        path=path,
+        mtime=1.0,
+        file_hash=f"h{seed}",
+        chunks=[(0, 0, f"body {seed}")],
+        embeddings=_stub_embeddings(1, seed=seed),
+    )
+
+
+def test_remove_path_does_not_treat_underscore_as_wildcard(db):
+    """`_` is a LIKE wildcard; an unescaped prefix eats siblings.
+
+    Every `feedback_*.md` doc id carries an underscore, and add_chunks calls
+    remove_path on every replacement, so this is the live path.
+    """
+    _add(db, "a_b.md", 1)
+    _add(db, "axb.md/child", 2)
+    _add(db, "a_b.md_other", 3)
+    _add(db, "a_b.md/child", 4)
+
+    removed = remove_path(db, "a_b.md")
+    assert removed == 2  # the exact doc + its real "/"-prefixed child
+
+    left = sorted(f[0] for f in list_files(db))
+    assert left == ["a_b.md_other", "axb.md/child"]
+    assert stats(db)["chunk_count"] == 2
+
+
+def test_remove_path_does_not_treat_percent_as_wildcard(db):
+    _add(db, "p%q", 1)
+    _add(db, "pZZq/child", 2)
+    _add(db, "p%q/child", 3)
+
+    removed = remove_path(db, "p%q")
+    assert removed == 2
+
+    left = sorted(f[0] for f in list_files(db))
+    assert left == ["pZZq/child"]
+
+
+def test_remove_path_doc_id_prefix_is_literal(db):
+    """Synthetic stream ids are removed exactly, siblings untouched."""
+    _add(db, "repo-md:cfg:memory/feedback_a.md", 1)
+    _add(db, "repo-md:cfg:memory/feedbackXa.md", 2)
+    _add(db, "repo-md:cfg:memory/feedback_a.md.bak", 3)
+
+    assert remove_path(db, "repo-md:cfg:memory/feedback_a.md") == 1
+
+    left = sorted(f[0] for f in list_files(db))
+    assert left == [
+        "repo-md:cfg:memory/feedbackXa.md",
+        "repo-md:cfg:memory/feedback_a.md.bak",
+    ]
+
+
+def test_remove_path_real_directory_prefix_still_works(db):
+    _add(db, "/tmp/d_ir/a.txt", 1)
+    _add(db, "/tmp/d_ir/sub/b.txt", 2)
+    _add(db, "/tmp/dXir/c.txt", 3)
+
+    assert remove_path(db, "/tmp/d_ir") == 2
+    left = sorted(f[0] for f in list_files(db))
+    assert left == ["/tmp/dXir/c.txt"]
+
+
 def test_needs_reindex(db):
     add_chunks(
         db,
