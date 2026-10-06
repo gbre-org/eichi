@@ -34,7 +34,7 @@ _FIXTURE_PUBLIC_SOURCES = {
     "test-public-d",
 }
 _FIXTURE_PRIVATE_SOURCES = {
-    "signal-chat",
+    "team-chat",
     "obsidian",
     "repo-md",
     "queue-logs",
@@ -80,8 +80,8 @@ def client(monkeypatch):
             [
                 {
                     "score": 0.42,
-                    "source": "signal-chat",
-                    "path": "signal-chat:dm:andrew:1",
+                    "source": "team-chat",
+                    "path": "team-chat:dm:alice:1",
                     "chunk_idx": 0,
                     "offset": 0,
                     "snippet": f"first hit for {query}",
@@ -137,7 +137,7 @@ def test_search_happy_path(client):
     assert len(body["results"]) == 2
     first = body["results"][0]
     # _shape() stamps a stable composite key for morphdom.
-    assert first["key"] == "signal-chat:signal-chat:dm:andrew:1:0"
+    assert first["key"] == "team-chat:team-chat:dm:alice:1:0"
     assert first["snippet"] == "first hit for test query"
 
 
@@ -211,11 +211,11 @@ def test_source_filter_passes_through(client, monkeypatch):
         return ([], None)
 
     monkeypatch.setattr(search_app, "_run_search", _spy)
-    # signal-chat is NOT in the default search-user role's allowlist, so
+    # team-chat is NOT in the default search-user role's allowlist, so
     # we send X-Auth-Role: admin to keep the historical happy-path
     # (previously every source passed through unconditionally).
     r = client.get(
-        "/api/search?q=foo&source=signal-chat&k=5",
+        "/api/search?q=foo&source=team-chat&k=5",
         headers={"X-Auth-Role": "admin"},
     )
     assert r.status_code == 200
@@ -223,7 +223,7 @@ def test_source_filter_passes_through(client, monkeypatch):
     assert body["ok"] is True
     assert captured["query"] == "foo"
     assert captured["k"] == 5
-    assert captured["source"] == "signal-chat"
+    assert captured["source"] == "team-chat"
     # No filter facets passed → all kwargs default to None.  An
     # explicit ?source= was passed, so allowed_sources stays None
     # (the explicit source is its own constraint).
@@ -310,8 +310,8 @@ def test_shape_prefers_mtime_over_indexed():
     """When both timestamps are present, mtime wins; ts_iso is UTC ISO8601."""
     rec = {
         "score": 0.4,
-        "source": "signal-chat",
-        "path": "signal-chat:dm:andrew:1",
+        "source": "team-chat",
+        "path": "team-chat:dm:alice:1",
         "chunk_idx": 0,
         "offset": 0,
         "snippet": "yo",
@@ -365,8 +365,8 @@ def test_api_search_carries_timestamp_fields(client, monkeypatch):
             [
                 {
                     "score": 0.42,
-                    "source": "signal-chat",
-                    "path": "signal-chat:dm:andrew:1",
+                    "source": "team-chat",
+                    "path": "team-chat:dm:alice:1",
                     "chunk_idx": 0,
                     "offset": 0,
                     "snippet": "hi",
@@ -409,11 +409,11 @@ def test_shape_passes_cluster_fields_through():
     response shape."""
     rec = {
         "score": 0.31,
-        "source": "signal-chat",
-        "path": "signal-chat:dm:andrew:2026-05-02:cluster:42",
+        "source": "team-chat",
+        "path": "team-chat:dm:alice:2026-05-02:cluster:42",
         "chunk_idx": 0,
         "offset": 0,
-        "snippet": "[2026-05-02 13:41 ET] andrew: yo\n[2026-05-02 13:48 ET] andrew: more",
+        "snippet": "[2026-05-02 13:41 ET] alice: yo\n[2026-05-02 13:48 ET] alice: more",
         "mtime": 1_777_000_000.0,       # cluster start
         "mtime_end": 1_777_000_420.0,   # +7 minutes
         "indexed_at_unix": 1_777_500_000.0,
@@ -437,8 +437,8 @@ def test_shape_msg_row_has_empty_cluster_fields():
     so the front-end's `kind === "cluster"` guard skips badge rendering."""
     rec = {
         "score": 0.4,
-        "source": "signal-chat",
-        "path": "signal-chat:dm:andrew:2026-05-02:msg:7",
+        "source": "team-chat",
+        "path": "team-chat:dm:alice:2026-05-02:msg:7",
         "chunk_idx": 0,
         "offset": 0,
         "snippet": "single message",
@@ -458,7 +458,7 @@ def test_shape_msg_row_has_empty_cluster_fields():
 
 
 def test_shape_legacy_row_has_empty_cluster_fields():
-    """Legacy / non-signal connectors that never carried cluster columns
+    """Legacy / non-cluster connectors that never carried cluster columns
     must still produce a sane envelope (no KeyError, defaults applied)."""
     rec = {
         "score": 0.5,
@@ -481,7 +481,7 @@ def test_shape_cluster_size_coerces_garbage():
     not blow up _shape()."""
     rec = {
         "score": 0.4,
-        "source": "signal-chat",
+        "source": "team-chat",
         "path": "p",
         "chunk_idx": 0,
         "offset": 0,
@@ -504,8 +504,8 @@ def test_api_search_carries_cluster_fields(client, monkeypatch):
             [
                 {
                     "score": 0.31,
-                    "source": "signal-chat",
-                    "path": "signal-chat:dm:andrew:cluster:42",
+                    "source": "team-chat",
+                    "path": "team-chat:dm:alice:cluster:42",
                     "chunk_idx": 0,
                     "offset": 0,
                     "snippet": "yo … more",
@@ -540,8 +540,8 @@ def test_api_search_msg_row_has_no_cluster_size(client, monkeypatch):
             [
                 {
                     "score": 0.4,
-                    "source": "signal-chat",
-                    "path": "signal-chat:dm:andrew:msg:7",
+                    "source": "team-chat",
+                    "path": "team-chat:dm:alice:msg:7",
                     "chunk_idx": 0,
                     "offset": 0,
                     "snippet": "hi",
@@ -783,12 +783,12 @@ def test_auth_uid_header_forwarded_to_worker(client, monkeypatch):
     r = client.get(
         "/api/search?q=foo",
         headers={
-            "X-Auth-Uid": "firebase-uid-andrew",
+            "X-Auth-Uid": "firebase-uid-alice",
             "X-Auth-Role": "admin",
         },
     )
     assert r.status_code == 200
-    assert captured["kw"]["user_uid"] == "firebase-uid-andrew"
+    assert captured["kw"]["user_uid"] == "firebase-uid-alice"
     assert captured["kw"]["role"] == "admin"
 
 
@@ -1085,9 +1085,9 @@ def _spy_run_search(monkeypatch, captured):
 
 
 # T2 — search-user explicit private source → 403.
-def test_t2_search_user_signal_chat_403(client):
+def test_t2_search_user_team_chat_403(client):
     r = client.get(
-        "/api/search?q=foo&source=signal-chat",
+        "/api/search?q=foo&source=team-chat",
         headers={"X-Auth-Role": "search-user"},
     )
     assert r.status_code == 403
@@ -1169,17 +1169,17 @@ def test_t7_admin_no_filter_unconstrained(client, monkeypatch):
 
 
 # T8 — admin explicit private source → 200.
-def test_t8_admin_signal_chat_200(client, monkeypatch):
+def test_t8_admin_team_chat_200(client, monkeypatch):
     captured: dict = {}
     _spy_run_search(monkeypatch, captured)
     r = client.get(
-        "/api/search?q=foo&source=signal-chat",
+        "/api/search?q=foo&source=team-chat",
         headers={"X-Auth-Role": "admin"},
     )
     assert r.status_code == 200
     body = r.get_json()
     assert body["ok"] is True
-    assert captured["source"] == "signal-chat"
+    assert captured["source"] == "team-chat"
 
 
 # T9 — missing X-Auth-Role → treated as search-user (most restrictive).
@@ -1196,7 +1196,7 @@ def test_t9_missing_role_header_treated_as_search_user(client, monkeypatch):
 # T9b — A request with the missing-header default may NOT pin a private
 # source (defence-in-depth: same outcome as an explicit search-user role).
 def test_t9b_missing_role_header_rejects_private_source(client):
-    r = client.get("/api/search?q=foo&source=signal-chat")
+    r = client.get("/api/search?q=foo&source=team-chat")
     assert r.status_code == 403
 
 
@@ -1242,7 +1242,7 @@ def test_t11_new_source_default_deny_for_search_user(client, monkeypatch):
 # search-user. The 403 body lists ONLY the role's own allowed sources.
 def test_t12_403_body_does_not_leak_private_sources(client):
     r = client.get(
-        "/api/search?q=foo&source=signal-chat",
+        "/api/search?q=foo&source=team-chat",
         headers={"X-Auth-Role": "search-user"},
     )
     assert r.status_code == 403
@@ -1251,10 +1251,10 @@ def test_t12_403_body_does_not_leak_private_sources(client):
     # Allowed sources mentioned (it's the role's own allowlist).
     for src in SEARCH_USER_SOURCES:
         assert src in err
-    # Private sources NOT mentioned. (signal-chat IS the rejected
+    # Private sources NOT mentioned. (team-chat IS the rejected
     # input → we tolerate it appearing once as the rejected value, but
     # not the OTHER private sources.)
-    for src in PRIVATE_SOURCES - {"signal-chat"}:
+    for src in PRIVATE_SOURCES - {"team-chat"}:
         assert src not in err, (
             f"private source {src!r} leaked in error message: {err!r}"
         )

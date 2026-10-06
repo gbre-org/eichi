@@ -52,6 +52,19 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
   }
+  // Stable 0-359 hue derived from an opaque source tag (FNV-1a), so every
+  // configured source gets a consistent colour without the stylesheet
+  // naming it. Spread via the golden angle is unnecessary at this scale.
+  function sourceHue(tag) {
+    let h = 2166136261;
+    const t = String(tag || '');
+    for (let i = 0; i < t.length; i++) {
+      h ^= t.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h % 360;
+  }
+
   function attr(s) {
     if (s === null || s === undefined) return '';
     return String(s)
@@ -338,13 +351,13 @@
       ? ` data-app-link="${attr(cardLink)}" tabindex="0" role="link"`
       : '';
     return (
-      `<article class="result-card" data-result-key="${attr(key)}" data-source="${attr(source)}"` +
+      `<article class="result-card" data-result-key="${attr(key)}" data-source="${attr(source)}" style="--src-hue:${sourceHue(source)}"` +
         (result.kind ? ` data-kind="${attr(result.kind)}"` : '') +
         (result.relevance_band ? ` data-band="${attr(result.relevance_band)}"` : '') +
         cardLinkAttrs +
       `>` +
         `<header class="result-head">` +
-          `<span class="badge source-badge source-${attr(source)}">${esc(source)}</span>` +
+          `<span class="badge source-badge">${esc(source)}</span>` +
           clusterBadgeHtml +
           scoreHtml(result) +
           chunkHtml +
@@ -595,7 +608,7 @@
   // navigating away.
   //
   // Background: pre-q-2026-05-04-26d6 the card had only a small pill
-  // anchor. Andrew (and most users) instinctively clicked the result
+  // anchor. Users instinctively clicked the result
   // body / path text and got no navigation — the path was rendered as
   // a plain <span> for sources without a per-source URL builder. The
   // backend has computed the right deep link all along; this hooks it
