@@ -25,19 +25,18 @@ def _msg(mid, body, *, sender="andrew", ts=None, topic=None, reply_to=None,
 
 
 def _fake_api(pages):
-    """Return a _fetch_page replacement that serves ``pages`` (a list of
-    message lists, newest-first within each page) keyed by offset.
+    """Return a _fetch_page replacement that mimics the real API.
 
-    The fake mimics the real API: offset 0 returns the newest page, and
-    consecutive offsets step through older pages. An offset past the end
-    returns an empty list.
+    The real API ignores ``offset``: it returns the newest ``limit``
+    messages with ``id < before`` (all messages when ``before`` is
+    omitted), ascending by id within the page. ``pages`` is only
+    flattened into the message store.
     """
-    # Flatten newest-first across all pages, then re-slice by the
-    # limit/offset the connector requests so paging is realistic.
-    flat = [m for page in pages for m in page]
+    store = sorted((m for page in pages for m in page), key=lambda m: m["id"])
 
-    def _fetch(api_base, *, limit, offset, timeout):
-        return flat[offset:offset + limit]
+    def _fetch(api_base, *, limit, before, timeout):
+        eligible = [m for m in store if before is None or m["id"] < before]
+        return eligible[-limit:]
 
     return _fetch
 
@@ -111,15 +110,15 @@ def test_paging_stops_early_when_page_fully_below_cursor(monkeypatch):
     calls = {"n": 0}
     base_fetch = _fake_api(pages)
 
-    def _counting_fetch(api_base, *, limit, offset, timeout):
+    def _counting_fetch(api_base, *, limit, before, timeout):
         calls["n"] += 1
-        return base_fetch(api_base, limit=limit, offset=offset, timeout=timeout)
+        return base_fetch(api_base, limit=limit, before=before, timeout=timeout)
 
     monkeypatch.setattr(botchat, "_fetch_page", _counting_fetch)
     state = {"max_id": 4}  # messages 5,6 are new; 3,4 and below are not
     docs = list(botchat.iter_documents(state=state, config={"page_size": 2}))
     assert [d["doc_id"] for d in docs] == ["botchat:msg:6", "botchat:msg:5"]
-    # Should have fetched page 1 (new), page 2 (fully below cursor → stop).
+    # Page 1 (5,6) is new; page 2 (3,4) reaches the cursor -> stop.
     assert calls["n"] == 2
     assert state["max_id"] == 6
 
@@ -155,3 +154,20 @@ def test_api_base_resolution_env_wins(monkeypatch):
         "http://cfg-host:1111"
     )
     assert botchat._resolve_api_base(None) == botchat.DEFAULT_API_BASE
+
+
+def test_incremental_run_fetches_single_page(monkeypatch):
+    msgs = [_msg(i, f"m{i}") for i in range(1, 11)]
+    calls = {"n": 0}
+    base_fetch = _fake_api([msgs])
+
+    def _counting_fetch(api_base, *, limit, before, timeout):
+        calls["n"] += 1
+        return base_fetch(api_base, limit=limit, before=before, timeout=timeout)
+
+    monkeypatch.setattr(botchat, "_fetch_page", _counting_fetch)
+    state = {"max_id": 8}
+    docs = list(botchat.iter_documents(state=state, config={"page_size": 5}))
+    assert [d["doc_id"] for d in docs] == ["botchat:msg:9", "botchat:msg:10"]
+    assert calls["n"] == 1
+    assert state["max_id"] == 10

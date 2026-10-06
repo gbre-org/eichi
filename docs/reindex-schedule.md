@@ -13,8 +13,10 @@ small shell script that:
    This file is host-local and **not** committed; it's where your personal
    corpus paths live.
 2. Runs every connector shipped with eichi (`eichi index --corpus <name>`:
-   currently `claude-jsonl`, `claude-watch-queue`). Both no-op gracefully
-   when their underlying paths are absent.
+   currently `claude-jsonl`, `claude-watch-queue`, `botchat`). Each no-ops
+   gracefully when its underlying path or API is absent. `botchat` is
+   incremental: it fetches only messages with an id above the stored
+   `max_id` cursor.
 
 It logs to `~/.local/state/eichi-reindex.log` (truncated each run — the log
 always reflects the latest tick only). Override with `EICHI_REINDEX_LOG`.

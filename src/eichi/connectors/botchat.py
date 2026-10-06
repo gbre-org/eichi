@@ -16,9 +16,10 @@ directly — the API is already the canonical read surface and avoids a
 ``$EICHI_BOTCHAT_API_BASE`` (point it at e.g.
 ``http://localhost:8111`` — the ``/api/messages`` path is appended).
 
-The API returns the most-recent messages first; the connector pages
-backwards via ``?limit=&offset=`` until it has walked every message (or
-until it reaches messages it has already indexed, per the cursor).
+The API returns the newest ``limit`` messages (ascending by id within
+the page); the connector pages backwards via ``?limit=&before=<id>``
+until it has walked every message (or until it reaches messages it has
+already indexed, per the cursor). ``offset`` is ignored by the API.
 
 Message shape (one element of the ``messages`` array)::
 
@@ -84,11 +85,13 @@ def _resolve_api_base(config: Optional[Dict[str, Any]]) -> str:
 
 
 def _fetch_page(
-    api_base: str, *, limit: int, offset: int, timeout: float
+    api_base: str, *, limit: int, before: Optional[int], timeout: float
 ) -> List[Dict[str, Any]]:
     """Fetch one page of messages. Returns [] on any error (connector
     must no-op rather than crash the whole index run)."""
-    url = f"{api_base}/api/messages?limit={limit}&offset={offset}"
+    url = f"{api_base}/api/messages?limit={limit}"
+    if before is not None:
+        url += f"&before={before}"
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -210,45 +213,46 @@ def iter_documents(
         timeout = DEFAULT_TIMEOUT
 
     new_max_id = prev_max_id
-    offset = 0
+    before: Optional[int] = None
     # Bound the walk so a runaway / misbehaving API can't loop forever.
     max_pages = 10_000
 
     for _ in range(max_pages):
-        page = _fetch_page(api_base, limit=page_size, offset=offset, timeout=timeout)
+        page = _fetch_page(api_base, limit=page_size, before=before, timeout=timeout)
         if not page:
             break
 
-        page_has_new = False
+        page_ids: List[int] = []
         for msg in page:
-            mid = msg.get("id")
             try:
-                mid_int = int(mid)
+                mid_int = int(msg.get("id"))
             except (TypeError, ValueError):
                 continue
+            page_ids.append(mid_int)
             if mid_int <= prev_max_id:
                 # Already indexed on a previous run — skip.
                 continue
-            page_has_new = True
-            doc = _build_doc(msg)
-            if doc is None:
-                # Still advance the high-water mark so empty messages
-                # don't get re-walked every run.
-                if mid_int > new_max_id:
-                    new_max_id = mid_int
-                continue
             if mid_int > new_max_id:
                 new_max_id = mid_int
-            yield doc
+            doc = _build_doc(msg)
+            # Empty messages still advance the high-water mark (above)
+            # so they are not re-walked every run.
+            if doc is not None:
+                yield doc
 
-        # If this whole page was below the cursor (nothing new), the
-        # newest-first ordering guarantees every older page is too —
-        # stop walking.
-        if not page_has_new and prev_max_id > 0:
+        if not page_ids:
             break
-        # Short final page → no more messages.
+        oldest = min(page_ids)
+        # The page reaches back to an already-indexed id: every older
+        # page is already covered, so steady-state runs fetch one page.
+        if oldest <= prev_max_id:
+            break
+        # Short page -> history exhausted.
         if len(page) < page_size:
             break
-        offset += page_size
+        # Page backwards: the API returns the newest ``limit`` messages
+        # with id < before (ascending within the page); it ignores any
+        # ``offset`` parameter.
+        before = oldest
 
     state["max_id"] = new_max_id

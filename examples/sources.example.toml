@@ -84,3 +84,10 @@ badge_color = "#d33682"      # magenta
 [sources.team-notes]
 label = "Team Notes"
 badge_color = "#268bd2"      # blue
+
+# Example: the built-in botchat connector (operator<->workbot chat).
+# Doc ids look like ``botchat:msg:1017``. No outbound URL — the badge
+# renders the label + colour and the result path stays inert.
+[sources.botchat]
+label = "botchat"
+badge_color = "#0ea5e9"      # sky blue
