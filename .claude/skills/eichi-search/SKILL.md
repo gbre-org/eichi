@@ -101,6 +101,14 @@ whose content changed, so it is not automatically live. If a very recent
 item doesn't turn up, run `eichi stats` and check `last indexed at` before
 concluding eichi genuinely has no answer — it may just not be indexed yet.
 
+## Recalling past conversations
+
+For "where did we leave X", "what did we decide", "remember when" and similar
+conversation-recall questions, use the `recall-conversations` skill: it wraps
+eichi in an ordered procedure (eichi per source, chat history, worklog, queue,
+live state). Note `--added-since` only applies to sources that stamp an
+added-at time; check `eichi stats` for sources and freshness.
+
 ## When NOT to use
 
 - **Exact-string lookups.** grep is faster and exact; eichi's embeddings
