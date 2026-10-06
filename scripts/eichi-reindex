@@ -16,7 +16,7 @@
 #      eichi.toml / ~/.config/eichi/eichi.toml) and is host-local, NOT
 #      committed — it's where YOUR personal corpus paths live.
 #   2. Every connector shipped with eichi (`eichi index --corpus <name>`,
-#      currently claude-jsonl, claude-watch-queue + botchat). Both no-op gracefully
+#      currently claude-jsonl, claude-watch-queue + botchat). Each no-ops gracefully
 #      when their underlying paths are absent, so this is safe to run on
 #      any machine, configured or not.
 #

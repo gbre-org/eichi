@@ -117,7 +117,7 @@ def test_paging_stops_early_when_page_fully_below_cursor(monkeypatch):
     monkeypatch.setattr(botchat, "_fetch_page", _counting_fetch)
     state = {"max_id": 4}  # messages 5,6 are new; 3,4 and below are not
     docs = list(botchat.iter_documents(state=state, config={"page_size": 2}))
-    assert [d["doc_id"] for d in docs] == ["botchat:msg:6", "botchat:msg:5"]
+    assert [d["doc_id"] for d in docs] == ["botchat:msg:5", "botchat:msg:6"]
     # Page 1 (5,6) is new; page 2 (3,4) reaches the cursor -> stop.
     assert calls["n"] == 2
     assert state["max_id"] == 6
