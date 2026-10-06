@@ -143,6 +143,12 @@ use. For a canonical list of corpora to re-index on a schedule, drop a
 
 See [`eichi.toml.example`](./eichi.toml.example) for the format.
 
+**Keeping the index fresh automatically**: `eichi index` is delta-only and
+idempotent, so a recurring job is cheap to run. See
+[`docs/reindex-schedule.md`](./docs/reindex-schedule.md) for a ready-made
+job ([`scripts/eichi-reindex`](./scripts/eichi-reindex)) plus the launchd /
+cron / systemd-timer wiring to run it every 15 minutes.
+
 Other environment variables:
 
 | Var | Meaning |

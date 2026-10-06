@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.claude-watch.eichi-reindex — recurring (every 15 min) delta reindex of
+  the local eichi semantic-search index. Runs scripts/eichi-reindex (this
+  repo), which walks every eichi.toml [[corpus]] entry plus every built-in
+  connector (claude-jsonl, claude-watch-queue). `eichi index` is delta-only
+  and idempotent, so a 15-minute cadence is cheap — an unchanged tick just
+  walks + skips.
+
+  This is a TEMPLATE (eichi is a public repo — no personal home-directory
+  paths are committed). Install via scripts/install-reindex-launchagent.sh,
+  which substitutes __HOME__ / __REPO_ROOT__ for your actual paths and
+  writes the result to ~/Library/LaunchAgents/, then bootstraps it:
+
+    ./scripts/install-reindex-launchagent.sh
+
+  Equivalent by hand:
+    sed -e "s#__HOME__#$HOME#g" -e "s#__REPO_ROOT__#$(pwd)#g" \
+      scripts/com.claude-watch.eichi-reindex.plist.template \
+      > ~/Library/LaunchAgents/com.claude-watch.eichi-reindex.plist
+    launchctl bootstrap gui/$(id -u) \
+      ~/Library/LaunchAgents/com.claude-watch.eichi-reindex.plist
+
+  Run now (test):
+    launchctl kickstart -k gui/$(id -u)/com.claude-watch.eichi-reindex
+
+  Status:
+    launchctl list | grep eichi-reindex
+
+  Logs:
+    ~/.local/state/eichi-reindex.log (truncated+rewritten each run)
+
+  Dismantle:
+    launchctl bootout gui/$(id -u)/com.claude-watch.eichi-reindex 2>/dev/null || true
+    rm ~/Library/LaunchAgents/com.claude-watch.eichi-reindex.plist
+
+  ProgramArguments[0] points directly at the repo's scripts/eichi-reindex
+  (shebang'd, executable) — no `bash` fronting — so macOS Background Task
+  Management attributes the activity to a descriptive name instead of an
+  anonymous interpreter.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-watch.eichi-reindex</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO_ROOT__/scripts/eichi-reindex</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/sbin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/eichi-reindex.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/eichi-reindex.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
