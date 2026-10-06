@@ -20,8 +20,10 @@ from .store import (
     DEFAULT_DB_PATH,
     _like_prefix_pattern,
     add_chunks,
+    collapse_paths,
     ensure_fts_backfill,
     fts_count,
+    fuse_groups,
     index_staleness,
     infer_source,
     list_files,
@@ -454,6 +456,8 @@ def _print_hit(h, json_out: bool, raw_score: bool = False) -> str:
                 # NULL). 1-based ranks.
                 "vec_rank": getattr(h, "vec_rank", None),
                 "bm25_rank": getattr(h, "bm25_rank", None),
+                # Cross-source fused score; null unless fusion ran.
+                "fused_score": getattr(h, "fused_score", None),
             }
         )
     ts_str = _format_hit_timestamp(h)
@@ -1150,6 +1154,23 @@ def _parse_duration(spec: Optional[str]) -> Optional[float]:
         ) from None
 
 
+# Live conversation sources searched by --conversations. Snapshot sources
+# (old transcripts, file notes) are deliberately left out so near-duplicate
+# stale chunks cannot crowd out recent conversations.
+CONVERSATION_SOURCES = ("botchat", "claude-jsonl", "claude-watch-queue")
+CONVERSATIONS_RECENCY_HALFLIFE = "14d"
+
+
+def _split_sources(spec: Optional[str]) -> List[str]:
+    """Split a comma-separated source list, dropping blanks and repeats."""
+    out: List[str] = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
 def cmd_query(args) -> int:
     import time as _time
     from . import embed
@@ -1190,52 +1211,96 @@ def cmd_query(args) -> int:
     # Over-fetch when dedupe is on, so we don't return < k after suppression.
     fetch_k = args.k * 3 if not args.granular else args.k
 
+    # --since DUR → event-timestamp cutoff (works for every source).
+    since_unix: Optional[float] = None
+    if getattr(args, "since", None):
+        try:
+            ssecs = _parse_duration(args.since)
+        except ValueError as e:
+            print(f"eichi: {e}", file=sys.stderr)
+            return 2
+        if ssecs is not None:
+            since_unix = _time.time() - ssecs
+
+    # Recency boost half-life (--recency-boost, or the --conversations default).
+    conversations = bool(getattr(args, "conversations", False))
+    halflife_s: Optional[float] = None
+    rb = getattr(args, "recency_boost", None)
+    if rb is None and conversations:
+        rb = CONVERSATIONS_RECENCY_HALFLIFE
+    if rb:
+        try:
+            halflife_s = _parse_duration(rb)
+        except ValueError as e:
+            print(f"eichi: {e}", file=sys.stderr)
+            return 2
+        if halflife_s is not None and halflife_s <= 0:
+            print("eichi: --recency-boost must be > 0", file=sys.stderr)
+            return 2
+
+    # Resolve the source set: --source a,b / --exclude-source / preset.
+    include = _split_sources(args.source)
+    exclude = set(_split_sources(getattr(args, "exclude_source", None)))
+    if conversations and not include:
+        include = list(CONVERSATION_SOURCES)
+    per_source = getattr(args, "per_source", None)
+    # None = one unscoped pass; otherwise one retrieval pass per source.
+    sources: Optional[List[str]] = None
+    if include or exclude or per_source is not None:
+        if not include:
+            include = [r["source"] for r in stats_by_source(conn)]
+        sources = [s_ for s_ in include if s_ not in exclude]
+    if per_source is not None and per_source < 1:
+        print("eichi: --per-source must be >= 1", file=sys.stderr)
+        return 2
+    collapse = bool(getattr(args, "collapse_paths", False)) or conversations
+    multi = sources is not None and (len(sources) != 1 or per_source is not None)
+    fuse = multi or halflife_s is not None or collapse
+    if fuse and sort != "relevance":
+        print(
+            "eichi: --sort cannot be combined with multi-source, "
+            "--recency-boost, --collapse-paths or --conversations",
+            file=sys.stderr,
+        )
+        return 2
+
     t0 = _time.monotonic()
-    # bm25-only mode skips the embedding round-trip entirely — useful
-    # for benchmarking + for the FTS-catches-literal-term test cases.
+    qvec = None  # type: ignore[assignment]
     if retrieval == "bm25":
-        qvec = None  # type: ignore[assignment]
-        t1 = _time.monotonic()
-        # Lazy backfill — populate fts5 for any chunk_meta rows that
-        # don't yet have an fts entry. Cheap no-op once steady-state.
+        # bm25-only mode skips the embedding round-trip entirely.
         ensure_fts_backfill(conn)
-        hits = search_bm25(
-            conn,
-            args.q,
-            k=fetch_k,
-            source=args.source,
+    else:
+        qvec = embed.encode_one(args.q)
+        if retrieval == "hybrid" and fts_count(conn) == 0:
+            ensure_fts_backfill(conn)
+    t1 = _time.monotonic()
+
+    def _retrieve(src: Optional[str], kk: int):
+        common = dict(
+            k=kk,
+            source=src,
             year_min=year_min,
             year_max=year_max,
             added_since_unix=added_since_unix,
+            since_unix=since_unix,
         )
-    else:
-        qvec = embed.encode_one(args.q)
-        t1 = _time.monotonic()
+        if retrieval == "bm25":
+            return search_bm25(conn, args.q, **common)
         if retrieval == "vector":
-            hits = search(
-                conn,
-                qvec,
-                k=fetch_k,
-                source=args.source,
-                year_min=year_min,
-                year_max=year_max,
-                added_since_unix=added_since_unix,
-                sort=sort,
-            )
-        else:  # hybrid
-            if fts_count(conn) == 0:
-                ensure_fts_backfill(conn)
-            hits = search_hybrid(
-                conn,
-                qvec,
-                args.q,
-                k=fetch_k,
-                source=args.source,
-                year_min=year_min,
-                year_max=year_max,
-                added_since_unix=added_since_unix,
-                sort=sort,
-            )
+            return search(conn, qvec, sort=sort, **common)
+        return search_hybrid(conn, qvec, args.q, sort=sort, **common)
+
+    if sources is None:
+        hits = _retrieve(None, fetch_k)
+        groups = [hits]
+    else:
+        quota = per_source if per_source is not None else fetch_k
+        groups = [_retrieve(src, quota) for src in sources]
+        hits = groups[0] if len(groups) == 1 else []
+    if fuse:
+        hits = fuse_groups(groups, halflife_s=halflife_s)
+        if collapse:
+            hits = collapse_paths(hits)
     if not args.granular:
         hits = _dedupe_cluster_overlap(hits)
     hits = hits[: args.k]
@@ -1504,7 +1569,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pq.add_argument("q")
     pq.add_argument("-k", type=int, default=10, help="top-k (default 10)")
-    pq.add_argument("--source", help="filter by source tag")
+    pq.add_argument(
+        "--source",
+        help=(
+            "filter by source tag; comma-separate several (a,b) to search "
+            "just those and fuse them by per-source RRF"
+        ),
+    )
+    pq.add_argument(
+        "--exclude-source",
+        default=None,
+        help="comma-separated source tags to drop (searches all others)",
+    )
+    pq.add_argument(
+        "--per-source",
+        type=int,
+        default=None,
+        help=(
+            "per-source candidate quota; forces per-source retrieval merged "
+            "by Reciprocal Rank Fusion so one noisy source cannot crowd out "
+            "the rest (default quota: the over-fetch size)"
+        ),
+    )
+    pq.add_argument(
+        "--since",
+        default=None,
+        help=(
+            "only return hits whose event timestamp (mtime, else ingest "
+            "time) is within DUR (e.g. 2d, 12h, 3w). Unlike --added-since "
+            "this works for every source."
+        ),
+    )
+    pq.add_argument(
+        "--recency-boost",
+        default=None,
+        metavar="HALFLIFE",
+        help=(
+            "weight fused scores by recency with this half-life (e.g. 14d); "
+            "undated hits get the minimum weight"
+        ),
+    )
+    pq.add_argument(
+        "--collapse-paths",
+        action="store_true",
+        help="keep only the best-ranked hit per path (drops duplicates)",
+    )
+    pq.add_argument(
+        "--conversations",
+        action="store_true",
+        help=(
+            "preset for recalling conversations: search the live sources "
+            f"({', '.join(CONVERSATION_SOURCES)}) with per-source RRF, a "
+            f"{CONVERSATIONS_RECENCY_HALFLIFE} recency boost and path "
+            "collapse. --source narrows it; --exclude-source trims it."
+        ),
+    )
     pq.add_argument("--json", action="store_true")
     pq.add_argument(
         "--granular",
