@@ -252,7 +252,7 @@ def _seed_two_sources(db):
     )
     add_chunks(
         db,
-        source="signal-chat",
+        source="team-chat",
         path="/s/shonen.md",
         mtime=1.0,
         file_hash="hs",
@@ -304,7 +304,7 @@ def test_allowed_sources_none_disables_filter(db):
     hits = search(db, embs[0], k=10, allowed_sources=None)
     sources = {h.source for h in hits}
     assert "calibre" in sources
-    assert "signal-chat" in sources
+    assert "team-chat" in sources
 
 
 def test_allowed_sources_intersects_with_explicit_source(db):
@@ -321,7 +321,7 @@ def test_allowed_sources_intersects_with_explicit_source(db):
         db,
         embs[0],
         k=10,
-        source="signal-chat",
+        source="team-chat",
         allowed_sources=["calibre"],
     )
     assert hits == []

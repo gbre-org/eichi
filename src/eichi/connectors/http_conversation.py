@@ -263,6 +263,14 @@ def _page_params(
     return params
 
 
+# Declared connector kind: a live conversation source (see
+# eichi.connectors for the contract).
+KIND = "conversation"
+# Corpora are user-named; there is no implicit corpus called after the
+# connector itself, so --conversations only includes configured ones.
+MULTI_CORPUS = True
+
+
 def iter_documents(
     state: Optional[Dict[str, Any]] = None,
     config: Optional[Dict[str, Any]] = None,
