@@ -7,6 +7,7 @@ supports --json. Index/reindex/rm support -n (dry run) and -v (verbose).
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -602,6 +603,14 @@ def _load_corpus_config(name: str) -> dict:
     return {}
 
 
+def _progress_mode(args) -> str:
+    if getattr(args, "no_progress", False):
+        return "off"
+    if getattr(args, "progress", False):
+        return "on"
+    return "auto"
+
+
 def _cmd_index_corpus(args) -> int:
     """Run a named connector and pipe its JSONL output into the index.
 
@@ -636,7 +645,21 @@ def _cmd_index_corpus(args) -> int:
     new_chunks = 0
     errors = 0
 
+    from .connectors import estimator_of
+    from .progress import Progress
+
+    est_fn = estimator_of(module)
+    # Snapshot the cursor: the estimator runs in a thread while the
+    # iterator mutates ``state`` in place.
+    est_state = copy.deepcopy(state)
+    progress = Progress(
+        name,
+        mode=_progress_mode(args),
+        estimate=(lambda: est_fn(est_state, config)) if est_fn else None,
+    )
+
     for doc in iter_docs(state=state, config=config):
+        progress.tick()
         doc_id = doc.get("doc_id")
         text = doc.get("text")
         source = doc.get("source") or name
@@ -756,7 +779,13 @@ def cmd_index(args) -> int:
     indexed = 0
     skipped = 0
     new_chunks = 0
+    from .progress import Progress
+
+    progress = Progress(
+        str(root), mode=_progress_mode(args), exact_total=len(candidates)
+    )
     for p in candidates:
+        progress.tick()
         path_str = str(p)
         try:
             st = p.stat()
@@ -1570,6 +1599,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     pi.add_argument("path", nargs="?")
+    pi.add_argument(
+        "--progress",
+        action="store_true",
+        help=(
+            "always print a periodic progress line (N done, ~remaining, "
+            "rate, ETA) to stderr. Default is auto: silent unless the run "
+            "turns out to be a large backfill"
+        ),
+    )
+    pi.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="never print progress lines",
+    )
     pi.add_argument(
         "--corpus",
         help=(

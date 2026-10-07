@@ -469,3 +469,44 @@ def iter_documents(
             continue
         yield from _emit_for_session(path, session_uuid, mtime)
         files_cursor[session_uuid] = mtime
+
+
+def _count_lines(path: Path) -> int:
+    n = 0
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                buf = fh.read(1 << 20)
+                if not buf:
+                    return n
+                n += buf.count(b"\n")
+    except OSError:
+        return n
+
+
+def estimate_pending(
+    state: Optional[Dict[str, Any]] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[int]:
+    """Estimate docs the next run will emit (progress output only).
+
+    Counts JSONL lines in sessions newer than the cursor. Docs are roughly
+    one per message plus clusters/summary, so this is an approximation.
+    Read-only: does not touch ``state``.
+    """
+    cfg = config or {}
+    files_cursor = (state or {}).get("files") or {}
+    root_override = os.environ.get("EICHI_CLAUDE_JSONL_ROOT") or cfg.get("root")
+    root = (
+        Path(os.path.expanduser(str(root_override)))
+        if root_override
+        else DEFAULT_ROOT
+    )
+    if not root.is_dir():
+        return 0
+    total = 0
+    for path, session_uuid, mtime, _size in _iter_session_files(root):
+        if mtime <= float(files_cursor.get(session_uuid, 0.0)):
+            continue
+        total += _count_lines(path)
+    return total

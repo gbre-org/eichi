@@ -26,6 +26,24 @@ def iter_documents(state=None, config=None):
 - `KIND = "conversation"` makes `eichi query --conversations` include every
   corpus backed by the connector.
 
+## Optional: progress estimates
+
+```python
+def estimate_pending(state=None, config=None):
+    # return a cheap estimate of how many docs the next iter_documents()
+    # run will emit, or None when unknown
+    ...
+```
+
+Large backfills print a progress line every ~30s (`eichi index --progress`,
+or automatically once a run proves large; `--no-progress` silences it).
+If the module (or function attribute) defines `estimate_pending`, eichi
+uses it for `~N% of ~total est.`, remaining count and ETA. It is optional:
+without it the line degrades to "N docs, rate". The hook runs in a
+background thread, receives a snapshot of `state`, must not mutate shared
+state, and its result is always shown as an estimate. Cursor-based HTTP
+sources typically cannot answer and should omit it.
+
 ## Registering
 
 ```toml
