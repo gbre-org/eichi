@@ -14,6 +14,16 @@ The standard contract is a function::
 incremental runs only re-emit changed content. ``config`` is per-connector
 configuration loaded from ``eichi.toml`` (path overrides, etc.).
 
+Optionally a connector may also provide::
+
+    def estimate_pending(state: dict | None = None,
+                         config: dict | None = None) -> int | None: ...
+
+returning a cheap estimate of how many documents the next
+``iter_documents`` run will emit (``None``/absent = unknown). It is used
+only for human-friendly progress output on large backfills, runs in a
+background thread, and must not mutate ``state``.
+
 Connectors shipped with eichi:
 
 - :mod:`eichi.connectors.claude_jsonl` — Anthropic CLI session JSONL files
@@ -127,7 +137,15 @@ def _resolve(obj) -> Optional[Callable]:
     return fn if callable(fn) else None
 
 
-def _discover_third_party(registry: Dict[str, Callable], kinds: Dict[str, str]):
+def _estimator_of(obj) -> Optional[Callable]:
+    """Optional ``estimate_pending(state, config)`` hook, read from the
+    module or (for a bare function) from a function attribute."""
+    fn = getattr(obj, "estimate_pending", None)
+    return fn if callable(fn) else None
+
+
+def _discover_third_party(registry: Dict[str, Callable], kinds: Dict[str, str],
+                          estimators: Optional[Dict[str, Callable]] = None):
     try:
         eps = _metadata.entry_points(group=ENTRY_POINT_GROUP)
     except Exception as exc:  # pragma: no cover — defensive
@@ -156,6 +174,18 @@ def _discover_third_party(registry: Dict[str, Callable], kinds: Dict[str, str]):
             continue
         registry[ep.name] = fn
         kinds[ep.name] = _kind_of(obj)
+        est = _estimator_of(obj)
+        if est is not None and estimators is not None:
+            estimators[ep.name] = est
+
+
+# Optional per-connector ``estimate_pending`` hooks, keyed like REGISTRY.
+ESTIMATORS: Dict[str, Callable] = {}
+
+
+def estimator_of(name: str) -> Optional[Callable]:
+    """The connector's ``estimate_pending`` hook, or None (total unknown)."""
+    return ESTIMATORS.get(name)
 
 
 def build_registry():
@@ -164,7 +194,14 @@ def build_registry():
         n: m.iter_documents for n, m in _BUILTIN_MODULES.items()
     }
     kinds: Dict[str, str] = {n: _kind_of(m) for n, m in _BUILTIN_MODULES.items()}
-    _discover_third_party(registry, kinds)
+    estimators: Dict[str, Callable] = {}
+    for n, m in _BUILTIN_MODULES.items():
+        est = _estimator_of(m)
+        if est is not None:
+            estimators[n] = est
+    _discover_third_party(registry, kinds, estimators)
+    ESTIMATORS.clear()
+    ESTIMATORS.update(estimators)
     return registry, kinds
 
 
@@ -181,6 +218,6 @@ def kind_of(name: str) -> str:
 
 __all__ = [
     "REGISTRY", "KINDS", "ENTRY_POINT_GROUP", "KIND_CONVERSATION",
-    "build_registry", "kind_of",
+    "build_registry", "kind_of", "ESTIMATORS", "estimator_of",
     "claude_jsonl", "claude_watch_queue", "http_conversation",
 ]

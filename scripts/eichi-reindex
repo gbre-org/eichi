@@ -29,6 +29,11 @@
 # unit). Keeping this script corpus/connector-driven only is what keeps it
 # safe to publish and reuse across machines.
 #
+# Every index call passes --progress: a progress line is emitted only once
+# a run has lasted ~30s, so a quiet steady-state tick logs nothing extra,
+# while a large backfill (e.g. after a cursor migration) reports N done /
+# ~remaining / rate / ETA instead of looking hung.
+#
 # Resolves `eichi` the same way bin/eichi does: via this script's own
 # location, so a relocated clone or a symlinked invocation still finds the
 # right venv. Falls back to PATH if the repo-relative binary isn't present
@@ -98,7 +103,7 @@ for c in load().corpora:
       if [ "$kind" = corpus ]; then
         # Connector corpus (e.g. an http-conversation source): incremental,
         # no-ops when its endpoint is unreachable.
-        run "$EICHI" index --corpus "$target"
+        run "$EICHI" index --progress --corpus "$target"
       else
         run "$EICHI" index "$target"
       fi
@@ -112,8 +117,8 @@ else
 fi
 
 # --- 2. Built-in connectors ------------------------------------------------
-run "$EICHI" index --corpus claude-jsonl
-run "$EICHI" index --corpus claude-watch-queue
+run "$EICHI" index --progress --corpus claude-jsonl
+run "$EICHI" index --progress --corpus claude-watch-queue
 
 echo "=== eichi-reindex done (rc=$rc) at $(date -u +%FT%TZ) ==="
 exit "$rc"
